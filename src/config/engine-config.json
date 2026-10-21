@@ -1,0 +1,145 @@
+{
+  "_note": "Simplified rule-of-thumb estimates for the v1 prototype. NOT ACCA Manual J/S/D. Edit freely.",
+  "climateZones": {
+    "1": {
+      "label": "Very hot-humid",
+      "coolingBtuhPerSqFt": 22,
+      "heatingBtuhPerSqFt": 10
+    },
+    "2": {
+      "label": "Hot",
+      "coolingBtuhPerSqFt": 20,
+      "heatingBtuhPerSqFt": 15
+    },
+    "3": {
+      "label": "Warm",
+      "coolingBtuhPerSqFt": 18,
+      "heatingBtuhPerSqFt": 20
+    },
+    "4": {
+      "label": "Mixed",
+      "coolingBtuhPerSqFt": 16,
+      "heatingBtuhPerSqFt": 25
+    },
+    "5": {
+      "label": "Cool",
+      "coolingBtuhPerSqFt": 14,
+      "heatingBtuhPerSqFt": 30
+    },
+    "6": {
+      "label": "Cold",
+      "coolingBtuhPerSqFt": 13,
+      "heatingBtuhPerSqFt": 35
+    },
+    "7": {
+      "label": "Very cold",
+      "coolingBtuhPerSqFt": 12,
+      "heatingBtuhPerSqFt": 40
+    }
+  },
+  "defaultClimateZone": 4,
+  "windowCoolingBtuhPerSqFt": {
+    "N": 10,
+    "E": 25,
+    "S": 30,
+    "W": 40
+  },
+  "windowHeatingBtuhPerSqFtPerZone": 6,
+  "exteriorWallCoolingBtuhPerSqFt": 1.2,
+  "exteriorWallHeatingBtuhPerSqFtPerZone": 0.45,
+  "ceilingHeightFactorPerFtAbove8": 0.08,
+  "floorTypeHeatingMultiplier": {
+    "slab": 1.0,
+    "crawlspace": 1.05,
+    "basement": 0.95,
+    "over-garage": 1.12
+  },
+  "cfmPerTon": 400,
+  "btuhPerTon": 12000,
+  "nominalTons": [
+    1.5,
+    2,
+    2.5,
+    3,
+    3.5,
+    4,
+    5
+  ],
+  "maxCfmPerSupplyRegister": 150,
+  "registerInsetFromWallFt": 1.0,
+  "minRegisterSpacingFt": 3.0,
+  "frictionRateInWcPer100Ft": 0.08,
+  "roundDuctCapacityCfm": [
+    {
+      "diameterIn": 4,
+      "maxCfm": 30
+    },
+    {
+      "diameterIn": 5,
+      "maxCfm": 55
+    },
+    {
+      "diameterIn": 6,
+      "maxCfm": 100
+    },
+    {
+      "diameterIn": 7,
+      "maxCfm": 140
+    },
+    {
+      "diameterIn": 8,
+      "maxCfm": 190
+    },
+    {
+      "diameterIn": 9,
+      "maxCfm": 260
+    },
+    {
+      "diameterIn": 10,
+      "maxCfm": 340
+    },
+    {
+      "diameterIn": 12,
+      "maxCfm": 550
+    },
+    {
+      "diameterIn": 14,
+      "maxCfm": 820
+    },
+    {
+      "diameterIn": 16,
+      "maxCfm": 1150
+    },
+    {
+      "diameterIn": 18,
+      "maxCfm": 1580
+    },
+    {
+      "diameterIn": 20,
+      "maxCfm": 2100
+    },
+    {
+      "diameterIn": 22,
+      "maxCfm": 2750
+    }
+  ],
+  "branchEfficiency": {
+    "lossFreeLengthFt": 20,
+    "lossPerFtBeyond": 0.005,
+    "minEfficiency": 0.6
+  },
+  "validation": {
+    "lowAirflowTolerance": 0.1,
+    "airflowMatchTolerance": 0.05,
+    "maxBranchLengthFt": 35,
+    "registerWallClearanceFt": 0.4,
+    "registerSpacingFt": 1.5,
+    "airHandlerClearanceFt": 2.0
+  },
+  "scoring": {
+    "lengthWeight": 1,
+    "fittingWeight": 4,
+    "imbalanceWeight": 2,
+    "roomCrossingPenaltyFt": 12
+  }
+}

@@ -1,0 +1,113 @@
+import { useState } from 'react';
+import { ACCEPTED_PLAN_TYPES, fileToBackground } from '../../lib/fileIO';
+import { SAMPLE_PLANS } from '../../samples/plans';
+import { renderSamplePlanImage } from '../../samples/renderPlanImage';
+import { useStore } from '../../state/store';
+import type { BackgroundImage } from '../../types';
+import { Button, Panel } from '../ui';
+
+/** Grid used when the user draws without a floor plan image. */
+export const BLANK_GRID: Omit<BackgroundImage, 'dataUrl'> & { pxPerFt: number } = { width: 2000, height: 1400, fileName: '', pxPerFt: 20 };
+
+export function UploadStep() {
+  const background = useStore((s) => s.project.background);
+  const hasRooms = useStore((s) => s.project.rooms.length > 0);
+  const update = useStore((s) => s.update);
+  const setStep = useStore((s) => s.setStep);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+
+  const useBackground = (bg: BackgroundImage) => {
+    update((d) => {
+      d.background = bg;
+      // A new image means a new pixel space: the old scale no longer applies.
+      d.scalePxPerFt = null;
+      d.scaleLine = null;
+    });
+    useStore.getState().setTraceTool('scale');
+    setStep(2);
+  };
+
+  const handleFile = async (file: File | undefined) => {
+    if (!file) return;
+    setBusy(true);
+    setError(null);
+    try {
+      useBackground(await fileToBackground(file));
+    } catch (e) {
+      setError((e as Error).message || 'Could not read that file.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mx-auto grid max-w-5xl gap-6 px-4 py-8 lg:grid-cols-[1fr_300px]">
+      <div>
+        <label
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragOver(true);
+          }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragOver(false);
+            handleFile(e.dataTransfer.files[0]);
+          }}
+          className={`flex h-80 cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed text-center transition ${
+            dragOver ? 'border-accent bg-accent-soft' : 'border-gray-300 hover:border-gray-400'
+          }`}
+        >
+          <input type="file" accept={ACCEPTED_PLAN_TYPES} className="hidden" onChange={(e) => handleFile(e.target.files?.[0])} />
+          <div className="text-3xl text-gray-300">⬆</div>
+          <div className="mt-2 text-sm font-medium">{busy ? 'Reading file…' : 'Drop a floor plan here, or click to browse'}</div>
+          <div className="mt-1 text-xs text-gray-500">PNG, JPG or PDF (first page is used)</div>
+          {hasRooms && <div className="mt-2 text-xs text-amber-700">A new plan clears the scale. Traced rooms stay but may need re-aligning.</div>}
+        </label>
+        {error && <p className="mt-3 text-sm text-danger">{error}</p>}
+        {background && (
+          <div className="mt-6">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-sm text-gray-600">
+                Current plan: <span className="font-medium text-gray-900">{background.fileName || 'image'}</span> ({background.width}×{background.height}px)
+              </span>
+              <Button variant="primary" onClick={() => setStep(2)}>
+                Continue →
+              </Button>
+            </div>
+            <img src={background.dataUrl} alt="Floor plan" className="max-h-72 w-full rounded border border-gray-200 object-contain" />
+          </div>
+        )}
+      </div>
+      <div className="space-y-4">
+        <Panel title="No plan handy?">
+          <p className="mb-3 text-xs text-gray-500">Use a sample floor plan image to try tracing, or draw on a blank grid.</p>
+          <div className="space-y-2">
+            {SAMPLE_PLANS.map((plan) => (
+              <Button key={plan.id} className="w-full !justify-start" onClick={() => useBackground(renderSamplePlanImage(plan))}>
+                {plan.name}
+              </Button>
+            ))}
+            <Button
+              variant="ghost"
+              className="w-full"
+              onClick={() => {
+                update((d) => {
+                  d.background = null;
+                  d.scalePxPerFt = BLANK_GRID.pxPerFt;
+                  d.scaleLine = null;
+                });
+                useStore.getState().setTraceTool('draw');
+                setStep(2);
+              }}
+            >
+              Draw on a blank grid
+            </Button>
+          </div>
+        </Panel>
+      </div>
+    </div>
+  );
+}
