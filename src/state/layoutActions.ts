@@ -1,5 +1,6 @@
-import { equipmentForTons, generateProjectLayout, rebalanceAirflow } from '../engine';
-import type { Pt } from '../types';
+import { equipmentForTons, generateProjectLayout, rebalanceAirflow, snapToBay, type DesignKey } from '../engine';
+import type { Framing, Pt } from '../types';
+import { engineResult } from './engine';
 import { useStore } from './store';
 
 const snapFt = (v: number) => Math.round(v * 4) / 4;
@@ -17,7 +18,10 @@ export function draggableKind(id: string | null): 'ahu' | 'trunk' | 'register' |
 export function moveComponent(id: string, p: Pt) {
   const kind = draggableKind(id);
   if (!kind) return;
-  const q = { x: snapFt(p.x), y: snapFt(p.y) };
+  let q = { x: snapFt(p.x), y: snapFt(p.y) };
+  // In joist bays a register boot has to sit between joists.
+  const grid = kind === 'register' ? engineResult(useStore.getState().project).grid : null;
+  if (grid) q = snapToBay(q, grid);
   useStore.getState().update(
     (d) => {
       const L = d.layout!;
@@ -78,4 +82,26 @@ export function addRegister(roomId: string, kind: 'supply' | 'return', position:
   const id = `${kind === 'supply' ? 's' : 'r'}-${roomId}-${Math.random().toString(36).slice(2, 6)}`;
   useStore.getState().update((d) => void d.layout?.registers.push({ id, roomId, kind, position, targetCfm: kind === 'supply' ? 75 : 100 }));
   useStore.getState().select(id);
+}
+
+export function setFraming(patch: Partial<Framing>) {
+  useStore.getState().update(
+    (d) => {
+      d.framing = { ...engineResult(useStore.getState().project).framing, ...patch };
+    },
+    { coalesce: `framing-${Object.keys(patch).join()}` },
+  );
+}
+
+/** Sets one load-calculation input for this project; undefined restores the climate-zone default. */
+export function setDesignInput(key: DesignKey, value: number | undefined) {
+  useStore.getState().update(
+    (d) => {
+      const next = { ...d.design };
+      if (value === undefined) delete next[key];
+      else next[key] = value;
+      d.design = next;
+    },
+    { coalesce: `design-${key}` },
+  );
 }

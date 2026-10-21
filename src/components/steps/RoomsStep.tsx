@@ -2,13 +2,17 @@ import { useEffect } from 'react';
 import { deriveWalls } from '../../engine';
 import { polygonArea } from '../../engine/geometry';
 import { newId } from '../../lib/ids';
-import { fmtBtuh, fmtCfm, fmtInt, fmtSqFt } from '../../lib/format';
+import { fmtSqFt } from '../../lib/format';
 import { applyRoomDefaults } from '../../lib/roomDefaults';
 import { useEngine } from '../../state/engine';
 import { useStore } from '../../state/store';
 import type { FloorType, Room, Wall } from '../../types';
+import { BuildingAssumptions, LoadBreakdown } from '../LoadPanels';
 import { PlanView } from '../PlanView';
-import { Button, Field, NumberInput, Select, Stat, TextInput } from '../ui';
+import { Button, Field, NumberInput, OptionalNumberInput, Select, TextInput } from '../ui';
+
+/** Selection id for the project-wide assumptions panel. */
+const BUILDING = '__building__';
 
 const FLOOR_TYPES: { id: FloorType; label: string }[] = [
   { id: 'slab', label: 'Slab on grade' },
@@ -35,10 +39,11 @@ export function RoomsStep() {
     });
   }, []);
 
+  const showBuilding = selectedId === BUILDING;
   const room = project.rooms.find((r) => r.id === selectedId) ?? project.rooms[0];
   useEffect(() => {
-    if (room && room.id !== selectedId) select(room.id);
-  }, [room, selectedId, select]);
+    if (!showBuilding && room && room.id !== selectedId) select(room.id);
+  }, [room, selectedId, select, showBuilding]);
 
   const editRoom = (fn: (r: Room) => void, coalesce?: string) =>
     update(
@@ -63,8 +68,12 @@ export function RoomsStep() {
   return (
     <div className="flex h-full min-h-0 flex-col lg:flex-row">
       <aside className="flex w-full shrink-0 gap-1 overflow-x-auto border-b border-gray-200 p-2 lg:block lg:w-56 lg:overflow-y-auto lg:border-b-0 lg:border-r">
+        <button onClick={() => select(BUILDING)} className={`mb-1 block shrink-0 rounded-md border px-3 py-2 text-left text-sm lg:w-full ${showBuilding ? 'border-accent bg-accent-soft font-medium text-accent' : 'border-gray-200 hover:bg-gray-50'}`}>
+          <div>Building assumptions</div>
+          <div className="text-xs text-gray-500">Temperatures, insulation, air leakage</div>
+        </button>
         {project.rooms.map((r) => (
-          <button key={r.id} onClick={() => select(r.id)} className={`mb-0.5 block shrink-0 rounded-md px-3 py-2 text-left text-sm lg:w-full ${r.id === room.id ? 'bg-accent-soft font-medium text-accent' : 'hover:bg-gray-50'}`}>
+          <button key={r.id} onClick={() => select(r.id)} className={`mb-0.5 block shrink-0 rounded-md px-3 py-2 text-left text-sm lg:w-full ${!showBuilding && r.id === room.id ? 'bg-accent-soft font-medium text-accent' : 'hover:bg-gray-50'}`}>
             <div className="truncate">{r.name}</div>
             <div className="text-xs text-gray-500">
               {Math.round(polygonArea(r.polygon))} ft² · {r.ceilingHeight} ft{r.isBedroom ? ' · bedroom' : ''}
@@ -74,13 +83,18 @@ export function RoomsStep() {
       </aside>
 
       <div className="relative min-h-[55vh] min-w-0 flex-1 bg-white p-4">
-        <PlanView project={project} result={result} selectedId={room.id} focusRoomId={room.id} onSelect={(id) => id && project.rooms.some((r) => r.id === id) && select(id)} onWallClick={toggleExterior} className="h-full w-full" />
+        <PlanView project={project} result={result} selectedId={showBuilding ? null : room.id} focusRoomId={showBuilding ? null : room.id} onSelect={(id) => id && project.rooms.some((r) => r.id === id) && select(id)} onWallClick={toggleExterior} className="h-full w-full" />
         <div className="absolute bottom-4 left-4 rounded-md bg-white/90 px-3 py-2 text-xs text-gray-500 shadow-sm ring-1 ring-gray-200">
           Click a wall of the selected room to toggle exterior. <span className="font-semibold text-gray-800">━</span> exterior <span className="text-gray-400">━</span> interior <span className="text-sky-400">━</span> window · North is up
         </div>
       </div>
 
       <aside className="w-full shrink-0 overflow-y-auto border-t border-gray-200 bg-white lg:w-[380px] lg:border-l lg:border-t-0">
+        {showBuilding ? (
+          <div className="p-4">
+            <BuildingAssumptions result={result} />
+          </div>
+        ) : (
         <div className="space-y-4 p-4">
           <Field label="Room name">
             <TextInput value={room.name} onChange={(v) => editRoom((r) => void (r.name = v), 'name')} />
@@ -103,6 +117,15 @@ export function RoomsStep() {
               <span className="block text-xs text-gray-500">Gets its own return grille.</span>
             </span>
           </label>
+
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="People at peak" hint="Blank = automatic">
+              <OptionalNumberInput value={room.occupants} placeholder={Math.round((load?.occupants ?? 0) * 10) / 10} step={0.5} onChange={(v) => editRoom((r) => void (r.occupants = v), 'occ')} />
+            </Field>
+            <Field label="Appliances" hint="Blank = automatic">
+              <OptionalNumberInput value={room.applianceBtuh} placeholder={Math.round(load?.cooling.find((l) => l.key === 'appliances')?.btuh ?? 0)} step={100} suffix="BTU/h" onChange={(v) => editRoom((r) => void (r.applianceBtuh = v), 'appl')} />
+            </Field>
+          </div>
 
           <div>
             <div className="mb-2 flex items-baseline justify-between">
@@ -147,20 +170,9 @@ export function RoomsStep() {
             </ul>
           </div>
 
-          {load && (
-            <div className="rounded-md bg-gray-50 p-3">
-              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Estimated load</div>
-              <div className="grid grid-cols-3 gap-2">
-                <Stat label="Area" value={fmtSqFt(load.areaSqFt)} />
-                <Stat label="Cooling" value={fmtBtuh(load.coolingBtuh)} />
-                <Stat label="Airflow" value={fmtCfm(load.requiredCfm)} />
-              </div>
-              <div className="mt-2 text-xs text-gray-500">
-                Heating {fmtBtuh(load.heatingBtuh)} · base {fmtInt(load.breakdown.base)} + windows {fmtInt(load.breakdown.windows)} + walls {fmtInt(load.breakdown.walls)} + ceiling {fmtInt(load.breakdown.ceiling)}
-              </div>
-            </div>
-          )}
+          {load && <LoadBreakdown load={load} />}
         </div>
+        )}
         <div className="sticky bottom-0 border-t border-gray-100 bg-white p-4">
           <div className="mb-3 flex justify-between text-xs text-gray-500">
             <span>

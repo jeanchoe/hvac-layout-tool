@@ -1,5 +1,5 @@
 import { useMemo, useRef } from 'react';
-import type { EngineResult } from '../engine';
+import { joistPositions, type EngineResult } from '../engine';
 import { bbox, centroid, lerp, outwardNormal } from '../engine/geometry';
 import { draggableKind, moveComponent } from '../state/layoutActions';
 import { useStore } from '../state/store';
@@ -134,6 +134,23 @@ export function PlanView({ project, result, selectedId, onSelect, showLayout, ed
         }),
       )}
 
+      {showLayout && result.grid && (
+        <g clipPath="url(#plan-rooms)" style={{ pointerEvents: 'none' }}>
+          <clipPath id="plan-rooms">
+            {result.rooms.map((r) => (
+              <polygon key={r.id} points={r.polygon.map((p) => `${p.x},${p.y}`).join(' ')} />
+            ))}
+          </clipPath>
+          {joistPositions(result.rooms, result.grid).map((c) =>
+            result.grid!.framing.joistDirection === 'y' ? (
+              <line key={c} x1={c} y1={b.minY} x2={c} y2={b.minY + b.height} stroke="#c8a97a" strokeWidth={0.125} />
+            ) : (
+              <line key={c} x1={b.minX} y1={c} x2={b.minX + b.width} y2={c} stroke="#c8a97a" strokeWidth={0.125} />
+            ),
+          )}
+        </g>
+      )}
+
       {showLayout && layout && (
         <g>
           {result.ducts.map((d) => {
@@ -149,9 +166,9 @@ export function PlanView({ project, result, selectedId, onSelect, showLayout, ed
                 y2={d.end.y}
                 stroke={sel(d.id) || (isTrunk && sel('trunk')) ? COLORS.select : color(d.id, base)}
                 strokeOpacity={d.side === 'return' ? 0.7 : 0.85}
-                strokeWidth={Math.max(0.25, d.diameter / 12)}
+                strokeWidth={Math.max(0.25, (d.shape === 'rect' ? d.widthIn! : d.diameter) / 12)}
                 strokeDasharray={d.side === 'return' ? '0.6 0.4' : undefined}
-                strokeLinecap="round"
+                strokeLinecap={d.shape === 'rect' ? 'butt' : 'round'}
                 style={{ cursor: isTrunk && editable ? (layout.trunk.axis === 'x' ? 'ns-resize' : 'ew-resize') : 'pointer' }}
                 onPointerDown={startDrag(id)}
               />

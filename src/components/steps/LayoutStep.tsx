@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
 import { branchEfficiency, defaultConfig, type EngineResult } from '../../engine';
 import { centroid } from '../../engine/geometry';
-import { fmtBtuh, fmtCfm, fmtFt, fmtInt, fmtSqFt } from '../../lib/format';
+import { ductSize, fmtBtuh, fmtCfm, fmtFt, fmtInt, fmtSqFt } from '../../lib/format';
 import { lastEvalMs, useEngine } from '../../state/engine';
-import { addRegister, deleteRegister, draggableKind, rebalance, regenerateLayout, setAirHandlerTons, setRegisterCfm } from '../../state/layoutActions';
+import { addRegister, deleteRegister, draggableKind, rebalance, regenerateLayout, setAirHandlerTons, setFraming, setRegisterCfm } from '../../state/layoutActions';
 import { useStore } from '../../state/store';
-import type { Project } from '../../types';
+import type { Framing, Project } from '../../types';
 import { PlanView } from '../PlanView';
 import { Scene3D, type ViewRequest, type WallMode } from '../Scene3D';
 import { Button, EstimateBadge, NumberInput, Stat } from '../ui';
@@ -64,6 +64,16 @@ export function LayoutStep() {
               {m === '3d' ? '3D' : 'Plan'}
             </button>
           ))}
+          <span className="mx-1 h-5 w-px bg-gray-200" />
+          <select
+            aria-label="Where the ducts run"
+            className="rounded-md bg-transparent px-1 py-1 text-xs font-medium text-gray-800"
+            value={result.framing.ductSpace}
+            onChange={(e) => setFraming({ ductSpace: e.target.value as Framing['ductSpace'] })}
+          >
+            <option value="attic">Ducts: in attic</option>
+            <option value="joist-bays">Ducts: between joists</option>
+          </select>
           {mode === '3d' && (
             <>
               <span className="mx-1 h-5 w-px bg-gray-200" />
@@ -87,7 +97,7 @@ export function LayoutStep() {
 
         {result.layoutStale && (
           <div className="absolute left-1/2 top-16 flex -translate-x-1/2 items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900 shadow-sm">
-            Rooms changed since this layout was generated.
+            Rooms or framing changed since this layout was generated.
             <Button variant="primary" className="!py-1" onClick={() => regenerateLayout(false)}>
               Regenerate
             </Button>
@@ -211,7 +221,7 @@ function Properties({ project, result, selectedId }: { project: Project; result:
         {duct && (
           <>
             <Row label={reg.kind === 'supply' ? 'Branch' : 'Return duct'}>
-              {duct.diameter}" round · {fmtFt(duct.length)}
+              {ductSize(duct)} · {fmtFt(duct.length)}
             </Row>
             {reg.kind === 'supply' && <Row label="Est. delivered">{fmtCfm(reg.targetCfm * branchEfficiency(duct.length))}</Row>}
           </>
@@ -276,7 +286,7 @@ function Properties({ project, result, selectedId }: { project: Project; result:
               <tr key={d.id} className="border-t border-gray-100">
                 <td className="py-1">{d.id === 'trunk-stub' ? 'Plenum drop' : `#${i + 1}`}</td>
                 <td className="text-right">{fmtInt(d.cfm)}</td>
-                <td className="text-right">{d.diameter}"</td>
+                <td className="text-right">{d.shape === 'rect' ? `${d.widthIn}×${d.heightIn}"` : `${d.diameter}"`}</td>
                 <td className="text-right">{d.length.toFixed(1)} ft</td>
               </tr>
             ))}
@@ -292,7 +302,10 @@ function Properties({ project, result, selectedId }: { project: Project; result:
     return (
       <Section title={`${duct.side === 'supply' ? 'Supply' : 'Return'} ${duct.type}`} actions={<CloseBtn />}>
         <Row label="Airflow">{fmtCfm(duct.cfm)}</Row>
-        <Row label="Size">{duct.diameter}" round</Row>
+        <Row label="Size">{ductSize(duct)}</Row>
+        {duct.shape === 'rect' && <Row label="Round equivalent">{duct.diameter}"</Row>}
+        {duct.maxHeightIn !== undefined && <Row label="Space available">{duct.maxHeightIn}" deep</Row>}
+        {!duct.fits && <p className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-danger">No duct shape of this size fits here.</p>}
         <Row label="Length">{fmtFt(duct.length)}</Row>
         {duct.registerId && (
           <button className="mt-2 text-xs text-accent hover:underline" onClick={() => select(duct.registerId!)}>
@@ -322,6 +335,7 @@ function Properties({ project, result, selectedId }: { project: Project; result:
           Rebalance airflow
         </Button>
       </div>
+      <FramingPanel framing={result.framing} />
     </Section>
   );
 }
@@ -358,5 +372,73 @@ function Warnings({ result }: { result: EngineResult }) {
         </ul>
       )}
     </Section>
+  );
+}
+
+const DEPTHS: { value: number; label: string }[] = [
+  { value: 5.5, label: '2×6 (5½")' },
+  { value: 7.25, label: '2×8 (7¼")' },
+  { value: 9.25, label: '2×10 (9¼")' },
+  { value: 11.25, label: '2×12 (11¼")' },
+  { value: 11.875, label: 'I-joist 11⅞"' },
+  { value: 14, label: 'I-joist 14"' },
+  { value: 16, label: 'I-joist 16"' },
+];
+
+/** Where ducts run, and the joists they must fit between. */
+function FramingPanel({ framing }: { framing: Framing }) {
+  const joists = framing.ductSpace === 'joist-bays';
+  const field = 'rounded-md border border-gray-300 bg-white px-2 py-1 text-sm';
+  return (
+    <div className="mt-4 border-t border-gray-100 pt-4">
+      <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Duct space & framing</h4>
+      <div className="flex items-center justify-between gap-3 py-1 text-sm">
+        <label htmlFor="duct-space" className="text-gray-500">Ducts run</label>
+        <select id="duct-space" className={field} value={framing.ductSpace} onChange={(e) => setFraming({ ductSpace: e.target.value as Framing['ductSpace'] })}>
+          <option value="attic">In the attic, over the framing</option>
+          <option value="joist-bays">Between joists</option>
+        </select>
+      </div>
+      {joists ? (
+        <>
+          <div className="flex items-center justify-between gap-3 py-1 text-sm">
+            <label htmlFor="joist-dir" className="text-gray-500">Joists run</label>
+            <select id="joist-dir" className={field} value={framing.joistDirection} onChange={(e) => setFraming({ joistDirection: e.target.value as Framing['joistDirection'] })}>
+              <option value="y">North–south</option>
+              <option value="x">East–west</option>
+            </select>
+          </div>
+          <div className="flex items-center justify-between gap-3 py-1 text-sm">
+            <label htmlFor="joist-spacing" className="text-gray-500">Spacing</label>
+            <select id="joist-spacing" className={field} value={framing.spacingIn} onChange={(e) => setFraming({ spacingIn: Number(e.target.value) })}>
+              {[12, 16, 19.2, 24].map((v) => (
+                <option key={v} value={v}>
+                  {v}" on centre
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center justify-between gap-3 py-1 text-sm">
+            <label htmlFor="joist-depth" className="text-gray-500">Joist depth</label>
+            <select id="joist-depth" className={field} value={framing.depthIn} onChange={(e) => setFraming({ depthIn: Number(e.target.value) })}>
+              {(DEPTHS.some((d) => d.value === framing.depthIn) ? DEPTHS : [...DEPTHS, { value: framing.depthIn, label: `${framing.depthIn}"` }]).map((d) => (
+                <option key={d.value} value={d.value}>
+                  {d.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center justify-between gap-3 py-1 text-sm">
+            <label htmlFor="soffit-depth" className="text-gray-500">Trunk soffit, max depth</label>
+            <NumberInput className="w-24" value={framing.soffitDepthIn} min={4} max={36} step={1} suffix="in" onChange={(v) => setFraming({ soffitDepthIn: v })} />
+          </div>
+          <p className="mt-2 text-xs text-gray-500">
+            The trunk crosses the joists in a dropped soffit. Each branch runs along the joists inside one bay and turns rectangular when a round duct is too deep.
+          </p>
+        </>
+      ) : (
+        <p className="mt-1 text-xs text-gray-500">Flex branches lie over the ceiling framing, so they take the shortest route. Switch to “Between joists” for floor or ceiling cavities.</p>
+      )}
+    </div>
   );
 }

@@ -3,11 +3,11 @@ import { Canvas, useThree, type ThreeEvent } from '@react-three/fiber';
 import { useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
-import type { EngineResult } from '../engine';
+import { joistPositions, type EngineResult, type JoistGrid } from '../engine';
 import { bbox, centroid, dist } from '../engine/geometry';
 import { draggableKind, moveComponent } from '../state/layoutActions';
 import { useStore } from '../state/store';
-import type { Project, Pt } from '../types';
+import type { DuctSegment, Project, Pt, Room } from '../types';
 import { COLORS } from './PlanView';
 
 export type WallMode = 'cutaway' | 'full' | 'hidden';
@@ -60,8 +60,17 @@ function SceneContent({ project, result, selectedId, wallMode, showLabels, viewR
   const b = pts.length ? bbox(pts) : { minX: 0, minY: 0, maxX: 40, maxY: 30, width: 40, height: 30 };
   const center = new THREE.Vector3(b.minX + b.width / 2, 0, b.minY + b.height / 2);
   const maxCeiling = Math.max(8, ...result.rooms.map((r) => r.ceilingHeight));
-  const ductY = maxCeiling + 0.9;
   const roomById = new Map(result.rooms.map((r) => [r.id, r]));
+  const grid = result.grid;
+  // Attic: ducts lie above the ceiling. Joist bays: branches sit inside the joist depth and the
+  // trunks hang below the joists in a soffit.
+  const ductY = grid ? maxCeiling + grid.framing.depthIn / 24 : maxCeiling + 0.9;
+  const returnY = grid ? ductY : ductY + 0.9;
+  const ductHeight = (d: DuctSegment) => {
+    if (!grid || d.type === 'branch') return d.side === 'return' ? returnY : ductY;
+    return maxCeiling - (d.shape === 'rect' ? d.heightIn! : d.diameter) / 24;
+  };
+  const plenumTop = grid ? maxCeiling + grid.framing.depthIn / 12 + 0.5 : ductY + 2;
 
   const isSel = (id: string) => id === selectedId || (id.startsWith('trunk') && !!selectedId?.startsWith('trunk'));
   const colorFor = (id: string, base: string) => (isSel(id) ? COLORS.select : warned.has(id) ? COLORS.danger : base);
@@ -95,6 +104,8 @@ function SceneContent({ project, result, selectedId, wallMode, showLabels, viewR
             );
           })}
 
+      {grid && <Joists rooms={result.rooms} grid={grid} ceiling={maxCeiling} />}
+
       {showLabels &&
         result.rooms.map((room) => {
           const c = centroid(room.polygon);
@@ -109,11 +120,11 @@ function SceneContent({ project, result, selectedId, wallMode, showLabels, viewR
         <>
           {result.ducts.map((d) => {
             const isTrunk = d.type === 'trunk' && d.side === 'supply';
-            const y = d.side === 'return' ? ductY + 0.9 : ductY;
+            const y = ductHeight(d);
             const id = isTrunk ? 'trunk' : d.id;
             return (
               <Draggable key={d.id} id={id} height={y} project={project}>
-                <Duct a={d.start} b={d.end} y={y} radius={Math.max(0.2, d.diameter / 24)} color={colorFor(isTrunk ? 'trunk' : d.id, d.side === 'supply' ? COLORS.accent : COLORS.return)} highlight={warned.has(d.id)} />
+                <Duct duct={d} y={y} color={colorFor(isTrunk ? 'trunk' : d.id, d.side === 'supply' ? COLORS.accent : COLORS.return)} highlight={warned.has(d.id)} />
               </Draggable>
             );
           })}
@@ -121,7 +132,7 @@ function SceneContent({ project, result, selectedId, wallMode, showLabels, viewR
           {layout.registers.map((r) => {
             const room = roomById.get(r.roomId);
             const ceil = room?.ceilingHeight ?? 8;
-            const top = r.kind === 'return' ? ductY + 0.9 : ductY;
+            const top = r.kind === 'return' ? returnY : ductY;
             const color = colorFor(r.id, r.kind === 'supply' ? COLORS.accent : COLORS.return);
             const size = r.kind === 'supply' ? [1.2, 0.12, 0.8] : [1.8, 0.12, 1.4];
             return (
@@ -153,12 +164,12 @@ function SceneContent({ project, result, selectedId, wallMode, showLabels, viewR
                 <meshStandardMaterial color={colorFor('ahu', '#334155')} emissive={isSel('ahu') ? COLORS.select : '#000'} emissiveIntensity={0.3} />
               </mesh>
               {/* Plenum rises above the duct runs so the unit stays easy to grab from any angle. */}
-              <mesh position={[0, (AHU_SIZE.h + ductY + 2) / 2, 0]}>
-                <boxGeometry args={[2, ductY + 2 - AHU_SIZE.h, 2]} />
+              <mesh position={[0, (AHU_SIZE.h + plenumTop) / 2, 0]}>
+                <boxGeometry args={[2, plenumTop - AHU_SIZE.h, 2]} />
                 <meshStandardMaterial color={isSel('ahu') ? COLORS.select : '#94a3b8'} />
               </mesh>
               {showLabels && (
-                <Html position={[0, ductY + 2.6, 0]} center style={{ pointerEvents: 'none' }}>
+                <Html position={[0, plenumTop + 0.6, 0]} center style={{ pointerEvents: 'none' }}>
                   <div className="whitespace-nowrap rounded bg-gray-900 px-1.5 py-0.5 text-[10px] font-semibold text-white">AHU {layout.airHandler.tons} t</div>
                 </Html>
               )}
@@ -214,24 +225,78 @@ function RoomFloor({ id, polygon, selected, warned, onSelect }: { id: string; po
   );
 }
 
-function Duct({ a, b, y, radius, color, highlight }: { a: Pt; b: Pt; y: number; radius: number; color: string; highlight: boolean }) {
+function Duct({ duct, y, color, highlight }: { duct: DuctSegment; y: number; color: string; highlight: boolean }) {
+  const { start: a, end: b } = duct;
   const len = dist(a, b);
-  const { position, quaternion } = useMemo(() => {
+  const rect = duct.shape === 'rect';
+  const radius = Math.max(0.2, duct.diameter / 24);
+  const { position, quaternion, angle } = useMemo(() => {
     const dir = new THREE.Vector3(b.x - a.x, 0, b.y - a.y).normalize();
     const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.lengthSq() ? dir : new THREE.Vector3(1, 0, 0));
-    return { position: new THREE.Vector3((a.x + b.x) / 2, y, (a.y + b.y) / 2), quaternion: q };
+    return { position: new THREE.Vector3((a.x + b.x) / 2, y, (a.y + b.y) / 2), quaternion: q, angle: -Math.atan2(b.y - a.y, b.x - a.x) };
   }, [a.x, a.y, b.x, b.y, y]);
   if (len < 0.01) return null;
+  const material = <meshStandardMaterial color={color} emissive={highlight ? COLORS.danger : '#000'} emissiveIntensity={0.25} metalness={0.2} roughness={0.5} />;
+  if (rect) {
+    return (
+      <mesh position={position} rotation-y={angle}>
+        <boxGeometry args={[len, duct.heightIn! / 12, duct.widthIn! / 12]} />
+        {material}
+      </mesh>
+    );
+  }
   return (
     <group>
       <mesh position={position} quaternion={quaternion}>
         <cylinderGeometry args={[radius, radius, len, 16]} />
-        <meshStandardMaterial color={color} emissive={highlight ? COLORS.danger : '#000'} emissiveIntensity={0.25} metalness={0.2} roughness={0.5} />
+        {material}
       </mesh>
       <mesh position={[b.x, y, b.y]}>
         <sphereGeometry args={[radius, 12, 12]} />
         <meshStandardMaterial color={color} />
       </mesh>
+    </group>
+  );
+}
+
+/** Where a joist line (fixed across-joist coordinate `c`) runs inside a room, as [from, to] along the joists. */
+function joistSpans(c: number, poly: Pt[], dir: 'x' | 'y'): [number, number][] {
+  const hits: number[] = [];
+  poly.forEach((p, i) => {
+    const q = poly[(i + 1) % poly.length];
+    const [pa, qa, pb, qb] = dir === 'y' ? [p.x, q.x, p.y, q.y] : [p.y, q.y, p.x, q.x];
+    if (pa > c !== qa > c) hits.push(pb + ((c - pa) / (qa - pa)) * (qb - pb));
+  });
+  hits.sort((m, n) => m - n);
+  const out: [number, number][] = [];
+  for (let i = 0; i + 1 < hits.length; i += 2) out.push([hits[i], hits[i + 1]]);
+  return out;
+}
+
+/** Ceiling joists above the rooms, so ducts read as sitting between them. */
+function Joists({ rooms, grid, ceiling }: { rooms: Room[]; grid: JoistGrid; ceiling: number }) {
+  const dir = grid.framing.joistDirection;
+  const depth = grid.framing.depthIn / 12;
+  const thick = 1.5 / 12;
+  const spans = useMemo(
+    () =>
+      joistPositions(rooms, grid).flatMap((c) =>
+        rooms.flatMap((r) => joistSpans(c, r.polygon, dir).map(([from, to]) => ({ c, from, to }))),
+      ),
+    [rooms, grid, dir],
+  );
+  return (
+    <group>
+      {spans.map(({ c, from, to }, i) => {
+        const mid = (from + to) / 2;
+        const len = to - from;
+        return (
+          <mesh key={i} position={dir === 'y' ? [c, ceiling + depth / 2, mid] : [mid, ceiling + depth / 2, c]} raycast={() => null}>
+            <boxGeometry args={dir === 'y' ? [thick, depth, len] : [len, depth, thick]} />
+            <meshStandardMaterial color="#d6b98c" transparent opacity={0.75} />
+          </mesh>
+        );
+      })}
     </group>
   );
 }

@@ -1,7 +1,12 @@
+import type { DuctSegment } from '../types';
+
 export const fmtInt = (n: number) => Math.round(n).toLocaleString('en-US');
 export const fmtFt = (n: number) => `${n.toFixed(1)} ft`;
 export const fmtSqFt = (n: number) => `${fmtInt(n)} sq ft`;
 export const fmtBtuh = (n: number) => `${fmtInt(n)} BTU/h`;
+
+/** Duct size as drawn: `8" round` or `16×14"` for rectangular. */
+export const ductSize = (d: DuctSegment) => (d.shape === 'rect' ? `${d.widthIn}×${d.heightIn}"` : `${d.diameter}" round`);
 export const fmtCfm = (n: number) => `${fmtInt(n)} CFM`;
 
 /** Parses lengths like `12`, `12.5`, `12'6"`, `12' 6`, `12ft 6in` into feet. */
