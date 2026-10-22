@@ -219,7 +219,8 @@
     "joistThicknessIn": 1.5,
     "ductClearanceIn": 0.5,
     "bootWidthIn": 10,
-    "maxAspectRatio": 4
+    "maxAspectRatio": 4,
+    "atticJoistDepthIn": 5.5
   },
   "validation": {
     "lowAirflowTolerance": 0.1,

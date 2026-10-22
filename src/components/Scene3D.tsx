@@ -3,7 +3,7 @@ import { Canvas, useThree, type ThreeEvent } from '@react-three/fiber';
 import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
-import { floorElevations, joistPositions, type EngineResult, type JoistGrid } from '../engine';
+import { defaultConfig, floorElevations, joistGrid, joistPositions, type EngineResult, type JoistGrid } from '../engine';
 import { bbox, centroid, dist } from '../engine/geometry';
 import { draggableKind, moveComponent } from '../state/layoutActions';
 import { useStore } from '../state/store';
@@ -26,6 +26,8 @@ interface SceneProps {
   selectedId: string | null;
   wallMode: WallMode;
   showLabels: boolean;
+  /** Draw joists (floor cavities and attic ceilings). */
+  showFraming: boolean;
   viewRequest: ViewRequest;
 }
 
@@ -38,6 +40,7 @@ interface FloorProps {
   selectedId: string | null;
   wallMode: WallMode;
   showLabels: boolean;
+  showFraming: boolean;
 }
 
 const AHU_SIZE = { w: 2.5, h: 4.5, d: 2.5 };
@@ -67,7 +70,7 @@ export function Scene3D(props: SceneProps) {
   );
 }
 
-function SceneContent({ project, results, floorId, floorView, selectedId, wallMode, showLabels, viewRequest }: SceneProps) {
+function SceneContent({ project, results, floorId, floorView, selectedId, wallMode, showLabels, showFraming, viewRequest }: SceneProps) {
   const elevations = floorElevations(project.floors);
   const shown = floorView === 'all' ? project.floors.map((f) => f.id) : [floorId];
   const pts = shown.flatMap((id) => results[id]?.rooms.flatMap((r) => r.polygon) ?? []);
@@ -93,6 +96,7 @@ function SceneContent({ project, results, floorId, floorView, selectedId, wallMo
             selectedId={selectedId}
             wallMode={id === floorId ? wallMode : 'cutaway'}
             showLabels={showLabels && id === floorId}
+            showFraming={showFraming}
           />
         ) : null,
       )}
@@ -119,22 +123,32 @@ function Ghost({ children }: { children: React.ReactNode }) {
   return <group ref={ref}>{children}</group>;
 }
 
-function FloorContent({ project, result, elevation, ghost, selectedId, wallMode, showLabels }: FloorProps) {
+function FloorContent({ project, result, elevation, ghost, selectedId, wallMode, showLabels, showFraming }: FloorProps) {
   const layout = project.layouts[result.floorId];
   const select = useStore((s) => s.select);
   const warned = useMemo(() => new Set(result.warnings.flatMap((w) => w.componentIds)), [result.warnings]);
   const maxCeiling = Math.max(8, ...result.rooms.map((r) => r.ceilingHeight));
   const roomById = new Map(result.rooms.map((r) => [r.id, r]));
   const grid = result.grid;
-  // Attic: ducts lie above the ceiling. Joist bays: branches sit inside the joist depth and the
-  // trunks hang below the joists in a soffit.
-  const ductY = grid ? maxCeiling + grid.framing.depthIn / 24 : maxCeiling + 0.9;
-  const returnY = grid ? ductY : ductY + 0.9;
+  // Every floor has ceiling framing: the floor cavity when ducts run between joists, otherwise
+  // the attic's ceiling joists, which attic ducts lie on top of.
+  const atticJoistFt = defaultConfig.framing.atticJoistDepthIn / 12;
+  const framingGrid = grid ?? joistGrid(result.rooms, { ...result.framing, ductSpace: 'joist-bays' });
+  const framingDepthFt = grid ? grid.framing.depthIn / 12 : atticJoistFt;
+  const halfHeight = (d: DuctSegment) => (d.shape === 'rect' ? d.heightIn! : d.diameter) / 24;
+  const supplyTrunkFt = Math.max(0, ...result.ducts.filter((d) => d.side === 'supply' && d.type === 'trunk').map((d) => halfHeight(d) * 2));
   const ductHeight = (d: DuctSegment) => {
-    if (!grid || d.type === 'branch') return d.side === 'return' ? returnY : ductY;
-    return maxCeiling - (d.shape === 'rect' ? d.heightIn! : d.diameter) / 24;
+    if (grid) {
+      // Branches sit inside the joist depth; trunks hang below the joists in a soffit.
+      return d.type === 'branch' ? maxCeiling + grid.framing.depthIn / 24 : maxCeiling - halfHeight(d);
+    }
+    // Attic: every duct rests on the ceiling joists; returns cross over the supply trunk.
+    const onJoists = maxCeiling + atticJoistFt;
+    return d.side === 'return' ? onJoists + supplyTrunkFt + halfHeight(d) : onJoists + halfHeight(d);
   };
-  const plenumTop = grid ? maxCeiling + grid.framing.depthIn / 12 + 0.5 : ductY + 2;
+  const branchOf = new Map(result.ducts.filter((d) => d.registerId).map((d) => [d.registerId!, d]));
+  const ductTop = Math.max(maxCeiling + framingDepthFt, ...result.ducts.map((d) => ductHeight(d) + halfHeight(d)));
+  const plenumTop = ductTop + 0.5;
 
   const isSel = (id: string) => id === selectedId || (id.startsWith('trunk') && !!selectedId?.startsWith('trunk'));
   const colorFor = (id: string, base: string) => (isSel(id) ? COLORS.select : warned.has(id) ? COLORS.danger : base);
@@ -161,7 +175,7 @@ function FloorContent({ project, result, elevation, ghost, selectedId, wallMode,
             );
           })}
 
-      {grid && <Joists rooms={result.rooms} grid={grid} ceiling={maxCeiling} />}
+      {showFraming && framingGrid && <Joists rooms={result.rooms} grid={framingGrid} ceiling={maxCeiling} depthFt={framingDepthFt} attic={!grid} />}
 
       {showLabels &&
         result.rooms.map((room) => {
@@ -189,7 +203,8 @@ function FloorContent({ project, result, elevation, ghost, selectedId, wallMode,
           {layout.registers.map((r) => {
             const room = roomById.get(r.roomId);
             const ceil = room?.ceilingHeight ?? 8;
-            const top = r.kind === 'return' ? returnY : ductY;
+            const branch = branchOf.get(r.id);
+            const top = branch ? ductHeight(branch) : maxCeiling + framingDepthFt;
             const color = colorFor(r.id, r.kind === 'supply' ? COLORS.accent : COLORS.return);
             const size = r.kind === 'supply' ? [1.2, 0.12, 0.8] : [1.8, 0.12, 1.4];
             return (
@@ -330,10 +345,10 @@ function joistSpans(c: number, poly: Pt[], dir: 'x' | 'y'): [number, number][] {
   return out;
 }
 
-/** Ceiling joists above the rooms, so ducts read as sitting between them. */
-function Joists({ rooms, grid, ceiling }: { rooms: Room[]; grid: JoistGrid; ceiling: number }) {
+/** Ceiling joists above the rooms: the floor cavity ducts run inside, or the attic ceiling they lie on. */
+function Joists({ rooms, grid, ceiling, depthFt, attic }: { rooms: Room[]; grid: JoistGrid; ceiling: number; depthFt: number; attic: boolean }) {
   const dir = grid.framing.joistDirection;
-  const depth = grid.framing.depthIn / 12;
+  const depth = depthFt;
   const thick = 1.5 / 12;
   const spans = useMemo(
     () =>
@@ -350,7 +365,7 @@ function Joists({ rooms, grid, ceiling }: { rooms: Room[]; grid: JoistGrid; ceil
         return (
           <mesh key={i} position={dir === 'y' ? [c, ceiling + depth / 2, mid] : [mid, ceiling + depth / 2, c]} raycast={() => null}>
             <boxGeometry args={dir === 'y' ? [thick, depth, len] : [len, depth, thick]} />
-            <meshStandardMaterial color="#d6b98c" transparent opacity={0.75} />
+            <meshStandardMaterial color="#d6b98c" transparent opacity={attic ? 0.45 : 0.75} />
           </mesh>
         );
       })}

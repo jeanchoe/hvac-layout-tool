@@ -47,7 +47,14 @@ export interface EngineConfig {
   roundDuctCapacityCfm: { diameterIn: number; maxCfm: number }[];
   branchEfficiency: { lossFreeLengthFt: number; lossPerFtBeyond: number; minEfficiency: number };
   framingDefaults: Framing;
-  framing: { joistThicknessIn: number; ductClearanceIn: number; bootWidthIn: number; maxAspectRatio: number };
+  framing: {
+    joistThicknessIn: number;
+    ductClearanceIn: number;
+    bootWidthIn: number;
+    maxAspectRatio: number;
+    /** Ceiling joists under an attic (drawn only; attic ducts lie on top of them). */
+    atticJoistDepthIn: number;
+  };
   validation: {
     lowAirflowTolerance: number;
     airflowMatchTolerance: number;

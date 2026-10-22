@@ -24,6 +24,7 @@ export function LayoutStep() {
   const [mode, setMode] = useState<'3d' | 'plan'>('3d');
   const [wallMode, setWallMode] = useState<WallMode>('cutaway');
   const [showLabels, setShowLabels] = useState(true);
+  const [showFraming, setShowFraming] = useState(true);
   const [viewRequest, setViewRequest] = useState<ViewRequest>({ kind: 'reset', nonce: 0 });
 
   // Every floor with rooms gets a starting layout the first time this step opens.
@@ -65,7 +66,7 @@ export function LayoutStep() {
     <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
       <div className="relative min-h-[65vh] min-w-0 flex-1">
         {mode === '3d' ? (
-          <Scene3D project={project} results={engineResults(project)} floorId={floor.id} floorView={multiFloor ? floorView : 'this'} selectedId={selectedId} wallMode={wallMode} showLabels={showLabels} viewRequest={viewRequest} />
+          <Scene3D project={project} results={engineResults(project)} floorId={floor.id} floorView={multiFloor ? floorView : 'this'} selectedId={selectedId} wallMode={wallMode} showLabels={showLabels} showFraming={showFraming} viewRequest={viewRequest} />
         ) : (
           <div className="h-full w-full p-6">
             <PlanView project={project} result={result} selectedId={selectedId} onSelect={select} showLayout editable className="h-full w-full" />
@@ -107,6 +108,9 @@ export function LayoutStep() {
               </select>
               <label className="flex items-center gap-1 px-2 text-xs text-gray-700">
                 <input type="checkbox" checked={showLabels} onChange={(e) => setShowLabels(e.target.checked)} className="accent-[#2563eb]" /> Labels
+              </label>
+              <label className="flex items-center gap-1 px-2 text-xs text-gray-700">
+                <input type="checkbox" checked={showFraming} onChange={(e) => setShowFraming(e.target.checked)} className="accent-[#2563eb]" /> Framing
               </label>
               <button className="rounded-md px-2 py-1 text-xs text-gray-700 hover:bg-gray-100" onClick={() => setViewRequest({ kind: 'reset', nonce: viewRequest.nonce + 1 })}>
                 Reset view
