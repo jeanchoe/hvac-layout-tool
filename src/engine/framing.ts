@@ -1,5 +1,6 @@
 import type { Framing, Pt, Room, Trunk } from '../types';
 import { defaultConfig, type EngineConfig } from './config';
+import { maxCfmForSpace } from './ductSizing';
 import { bbox } from './geometry';
 
 /** Joist layout in plan, measured across the joists. */
@@ -12,7 +13,17 @@ export interface JoistGrid {
   clearWidthIn: number;
   /** Tallest duct that fits inside a bay (in). */
   bayHeightIn: number;
+  /** Most airflow one duct can carry along a bay (CFM). */
+  bayMaxCfm: number;
+  /** Most airflow one duct can carry in the trunk soffit (CFM). */
+  soffitMaxCfm: number;
 }
+
+/** A grille or register this close to the trunk soffit connects into its side, with no run along a bay. */
+export const SOFFIT_CONNECTION_FT = 3;
+
+/** The return trunk runs beside the supply trunk, this far over (ft). */
+export const RETURN_TRUNK_GAP_FT = 1.5;
 
 /** Position of a point measured across the joists (x when joists run north-south). */
 export const acrossJoists = (p: Pt, framing: Framing) => (framing.joistDirection === 'y' ? p.x : p.y);
@@ -24,12 +35,16 @@ export function joistGrid(rooms: Room[], framing: Framing, config: EngineConfig 
   if (framing.ductSpace !== 'joist-bays' || rooms.length === 0) return null;
   const b = bbox(rooms.flatMap((r) => r.polygon));
   const f = config.framing;
+  const clearWidthIn = framing.spacingIn - f.joistThicknessIn;
+  const bayHeightIn = framing.depthIn - f.ductClearanceIn;
   return {
     framing,
     origin: framing.joistDirection === 'y' ? b.minX : b.minY,
     spacingFt: framing.spacingIn / 12,
-    clearWidthIn: framing.spacingIn - f.joistThicknessIn,
-    bayHeightIn: framing.depthIn - f.ductClearanceIn,
+    clearWidthIn,
+    bayHeightIn,
+    bayMaxCfm: maxCfmForSpace(bayHeightIn, clearWidthIn, config),
+    soffitMaxCfm: maxCfmForSpace(framing.soffitDepthIn, undefined, config),
   };
 }
 

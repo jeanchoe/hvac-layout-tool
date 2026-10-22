@@ -2,7 +2,7 @@ import type { DuctSegment, Framing, Layout, Pt, Register, Room, Trunk } from '..
 import { defaultConfig, resolveFraming, type EngineConfig } from './config';
 import { bbox, dist, pointInPolygon } from './geometry';
 import { branchEfficiency, fitDuct, sizeDuct } from './ductSizing';
-import { joistGrid, type JoistGrid } from './framing';
+import { RETURN_TRUNK_GAP_FT, SOFFIT_CONNECTION_FT, joistGrid, type JoistGrid } from './framing';
 
 export interface RouteResult {
   ducts: DuctSegment[];
@@ -159,8 +159,11 @@ export function routeDucts(rooms: Room[], layout: Layout, config: EngineConfig =
   }
   fittings += reducingRun('trunk', 'supply', takeoffs.map((k) => ({ t: k.t, cfm: k.reg.targetCfm })), a0, (t) => trunkPoint(trunk, t), soffit, ducts, config);
 
+  // Next to the soffit a register connects into its side, so only longer runs are limited by the bay.
+  const legLimit = (a: Pt, b: Pt) => (grid && dist(a, b) <= SOFFIT_CONNECTION_FT ? soffit : bay);
   for (const k of takeoffs) {
-    const d = seg(`branch-${k.reg.id}`, trunkPoint(trunk, k.t), k.reg.position, 'branch', 'supply', k.reg.targetCfm, config, bay, k.reg.id);
+    const start = trunkPoint(trunk, k.t);
+    const d = seg(`branch-${k.reg.id}`, start, k.reg.position, 'branch', 'supply', k.reg.targetCfm, config, legLimit(start, k.reg.position), k.reg.id);
     ducts.push(d);
     branchLength[k.reg.id] = d.length;
     efficiency[k.reg.id] = branchEfficiency(d.length, config);
@@ -182,11 +185,11 @@ export function routeDucts(rooms: Room[], layout: Layout, config: EngineConfig =
     }
   } else if (returns.length) {
     // A return trunk runs beside the supply trunk in the same soffit.
-    const rOffset = trunk.offset + 1.5;
+    const rOffset = trunk.offset + RETURN_TRUNK_GAP_FT;
     const at = (t: number) => pointOn(trunk.axis, rOffset, t);
     const legs = returns.map((reg) => ({ reg, t: clamp(along(trunk, reg.position), ext) }));
     for (const { reg, t } of legs) {
-      const d = seg(`return-${reg.id}`, reg.position, at(t), 'branch', 'return', reg.targetCfm, config, bay, reg.id);
+      const d = seg(`return-${reg.id}`, reg.position, at(t), 'branch', 'return', reg.targetCfm, config, legLimit(reg.position, at(t)), reg.id);
       ducts.push(d);
       branchLength[reg.id] = d.length;
       efficiency[reg.id] = 1;

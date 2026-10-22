@@ -41,3 +41,11 @@ export function fitDuct(diameterIn: number, maxHeightIn?: number, maxWidthIn?: n
   const fits = (maxWidthIn === undefined || w <= maxWidthIn) && w / h <= config.framing.maxAspectRatio;
   return { shape: 'rect', widthIn: w, heightIn: h, fits };
 }
+
+/** Most airflow (CFM) one duct can carry inside a space; 0 if not even the smallest duct fits. */
+export function maxCfmForSpace(maxHeightIn?: number, maxWidthIn?: number, config: EngineConfig = defaultConfig): number {
+  if (maxHeightIn === undefined && maxWidthIn === undefined) return Infinity;
+  let best = 0;
+  for (const row of config.roundDuctCapacityCfm) if (fitDuct(row.diameterIn, maxHeightIn, maxWidthIn, config).fits) best = row.maxCfm;
+  return best;
+}

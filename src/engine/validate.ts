@@ -1,5 +1,6 @@
 import type { Layout, Room, Warning, Wall } from '../types';
 import { defaultConfig, type EngineConfig } from './config';
+import { maxCfmForSpace } from './ductSizing';
 import { acrossJoists, bootHitsJoist } from './framing';
 import { dist, distToSegment, pointInPolygon } from './geometry';
 import type { RoomLoad } from './load';
@@ -98,6 +99,12 @@ export function validate({ rooms, walls, loads, layout, route, config = defaultC
     }
   }
   // 4. Framing: every duct must fit the space it runs in, and boots must land between joists.
+  // A branch that is too big can be split into several grilles in neighbouring bays.
+  const fixBySplitting = (d: (typeof route.ducts)[0]): Pick<Warning, 'fix'> => {
+    if (d.type !== 'branch' || !d.registerId || !route.grid) return {};
+    const cap = maxCfmForSpace(d.maxHeightIn, route.grid.clearWidthIn, config);
+    return cap > 0 ? { fix: { kind: 'split-register', registerId: d.registerId, parts: Math.ceil(d.cfm / cap) } } : {};
+  };
   for (const d of route.ducts) {
     if (d.fits) continue;
     const inches = (v = 0) => `${Math.round(v * 10) / 10}"`;
@@ -108,6 +115,7 @@ export function validate({ rooms, walls, loads, layout, route, config = defaultC
       severity: 'error',
       message: `A ${fmt(d.cfm)} CFM ${d.side} ${d.type} (${d.diameter}" round equivalent) doesn't fit the ${where}.`,
       componentIds: [d.id, ...(d.registerId ? [d.registerId] : [])],
+      ...fixBySplitting(d),
     });
   }
   if (route.grid) {

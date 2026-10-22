@@ -3,7 +3,7 @@ import { branchEfficiency, defaultConfig, type EngineResult } from '../../engine
 import { centroid } from '../../engine/geometry';
 import { ductSize, fmtBtuh, fmtCfm, fmtFt, fmtInt, fmtSqFt } from '../../lib/format';
 import { lastEvalMs, useEngine } from '../../state/engine';
-import { addRegister, deleteRegister, draggableKind, rebalance, regenerateLayout, setAirHandlerTons, setFraming, setRegisterCfm } from '../../state/layoutActions';
+import { addRegister, deleteRegister, draggableKind, rebalance, regenerateLayout, setAirHandlerTons, setFraming, setRegisterCfm, splitRegister } from '../../state/layoutActions';
 import { useStore } from '../../state/store';
 import type { Framing, Project } from '../../types';
 import { PlanView } from '../PlanView';
@@ -362,11 +362,18 @@ function Warnings({ result }: { result: EngineResult }) {
       ) : (
         <ul className="space-y-1.5">
           {ws.map((w) => (
-            <li key={w.id}>
-              <button onClick={() => select(w.componentIds.find((id) => id !== 'ahu') ?? w.componentIds[0])} className="flex w-full gap-2 rounded-md border border-red-100 bg-red-50/60 px-3 py-2 text-left text-sm hover:border-red-200">
-                <span className={`mt-0.5 h-2 w-2 shrink-0 rounded-full ${w.severity === 'error' ? 'bg-danger' : 'bg-amber-500'}`} />
+            <li key={w.id} className="rounded-md border border-red-100 bg-red-50/60 hover:border-red-200">
+              <button onClick={() => select(w.componentIds.find((id) => id !== 'ahu') ?? w.componentIds[0])} className="flex w-full gap-2 px-3 py-2 text-left text-sm">
+                <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${w.severity === 'error' ? 'bg-danger' : 'bg-amber-500'}`} />
                 <span className="text-gray-800">{w.message}</span>
               </button>
+              {w.fix?.kind === 'split-register' && (
+                <div className="px-3 pb-2 pl-7">
+                  <Button className="!py-1 text-xs" onClick={() => splitRegister(w.fix!.registerId, w.fix!.parts)}>
+                    Split into {w.fix.parts} {w.componentIds.some((id) => id.startsWith('return-')) ? 'grilles' : 'registers'}
+                  </Button>
+                </div>
+              )}
             </li>
           ))}
         </ul>

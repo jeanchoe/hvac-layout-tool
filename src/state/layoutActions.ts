@@ -1,4 +1,4 @@
-import { equipmentForTons, generateProjectLayout, rebalanceAirflow, snapToBay, type DesignKey } from '../engine';
+import { equipmentForTons, generateProjectLayout, rebalanceAirflow, snapToBay, splitRegister as splitRegisterLayout, type DesignKey } from '../engine';
 import type { Framing, Pt } from '../types';
 import { engineResult } from './engine';
 import { useStore } from './store';
@@ -59,6 +59,14 @@ export function rebalance() {
   const { project, update } = useStore.getState();
   const layout = rebalanceAirflow(project);
   update((d) => void (d.layout = layout));
+}
+
+/** Splits a register or grille into several in neighbouring bays, sharing its airflow. */
+export function splitRegister(id: string, parts: number) {
+  const { project, update, select } = useStore.getState();
+  const layout = splitRegisterLayout(project, id, parts);
+  update((d) => void (d.layout = layout));
+  select(null);
 }
 
 export function setRegisterCfm(id: string, cfm: number) {

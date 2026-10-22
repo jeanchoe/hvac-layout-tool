@@ -1,8 +1,8 @@
 // Pure engine: building in, layout plus warnings out. No UI imports.
 import type { DuctSegment, Framing, Layout, Project, Pt, Room, Wall, Warning } from '../types';
 import { climateForZip, defaultConfig, resolveDesign, resolveFraming, type ClimateInfo, type EngineConfig, type ResolvedDesign } from './config';
-import type { JoistGrid } from './framing';
-import { polygonArea } from './geometry';
+import { joistGrid, type JoistGrid } from './framing';
+import { distToPolygonEdge, pointInPolygon, polygonArea } from './geometry';
 import { assignAirflow, distribute, simplifiedLoadModel, sizeEquipment, type LoadModel, type RoomLoad } from './load';
 import { generateLayout, scoreLayout, type LayoutScore } from './layout';
 import { routeDucts } from './route';
@@ -121,6 +121,44 @@ export function generateProjectLayout(project: Project, opts: EngineOptions & { 
   }).layout;
 }
 
+/**
+ * Replaces one register with `parts` registers sharing its airflow, in neighbouring joist bays
+ * (or 2 ft apart outside joist bays), staying inside its room.
+ */
+export function splitRegister(project: Project, registerId: string, parts: number, opts: EngineOptions = {}): Layout | null {
+  const layout = project.layout;
+  const reg = layout?.registers.find((r) => r.id === registerId);
+  if (!layout || !reg || parts < 2) return layout;
+  const a = analyzeBuilding(project, opts);
+  const room = a.rooms.find((r) => r.id === reg.roomId);
+  const grid = joistGrid(a.rooms, a.framing, opts.config ?? defaultConfig);
+  const step = grid ? grid.spacingFt : 2;
+  const acrossIsX = grid ? a.framing.joistDirection === 'y' : layout.trunk.axis === 'x';
+  const gap = (opts.config ?? defaultConfig).validation.registerSpacingFt;
+  const taken = layout.registers.filter((r) => r.id !== registerId).map((r) => r.position);
+  const spots: Pt[] = [reg.position];
+  for (let k = 1; spots.length < parts && k <= 24; k++) {
+    for (const sign of [1, -1]) {
+      if (spots.length >= parts) break;
+      const p = acrossIsX ? { x: reg.position.x + sign * k * step, y: reg.position.y } : { x: reg.position.x, y: reg.position.y + sign * k * step };
+      if (room && (!pointInPolygon(p, room.polygon) || distToPolygonEdge(p, room.polygon) < 0.75)) continue;
+      // Keep pieces as far apart as any two registers must be (skips a bay when joists are close).
+      if ([...taken, ...spots].some((q) => Math.hypot(q.x - p.x, q.y - p.y) < gap)) continue;
+      spots.push(p);
+    }
+  }
+  const shares = distribute(reg.targetCfm, spots.map(() => 1));
+  const used = new Set(layout.registers.map((r) => r.id));
+  const freshId = () => {
+    let n = 2;
+    while (used.has(`${reg.id}-${n}`)) n++;
+    used.add(`${reg.id}-${n}`);
+    return `${reg.id}-${n}`;
+  };
+  const pieces = spots.map((position, i) => ({ ...reg, id: i === 0 ? reg.id : freshId(), position, targetCfm: shares[i] }));
+  return { ...layout, registers: layout.registers.flatMap((r) => (r.id === registerId ? pieces : [r])) };
+}
+
 /** Re-splits the air handler's airflow across the existing registers by room load, keeping positions. */
 export function rebalanceAirflow(project: Project, opts: EngineOptions = {}): Layout | null {
   const layout = project.layout;
@@ -142,12 +180,18 @@ export function rebalanceAirflow(project: Project, opts: EngineOptions = {}): La
     regs.reduce((m, r) => (r.targetCfm > m.targetCfm ? r : m)).targetCfm += diff;
   };
   fix(supply);
+  // Room returns carry their room's supply (split across that room's grilles); central grilles share the rest.
   const returns = registers.filter((r) => r.kind === 'return');
-  const central = returns.find((r) => r.id === 'r-central');
-  for (const r of returns) {
-    if (r !== central) r.targetCfm = supply.filter((s) => s.roomId === r.roomId).reduce((s, x) => s + x.targetCfm, 0);
+  const isCentral = (r: (typeof returns)[0]) => r.id === 'r-central' || r.id.startsWith('r-central-');
+  const central = returns.filter(isCentral);
+  for (const roomId of new Set(returns.filter((r) => !isCentral(r)).map((r) => r.roomId))) {
+    const mine = returns.filter((r) => !isCentral(r) && r.roomId === roomId);
+    const cfm = supply.filter((s) => s.roomId === roomId).reduce((s, x) => s + x.targetCfm, 0);
+    distribute(cfm, mine.map(() => 1)).forEach((v, i) => (mine[i].targetCfm = v));
   }
-  if (central) central.targetCfm = Math.max(0, total - returns.filter((r) => r !== central).reduce((s, r) => s + r.targetCfm, 0));
-  else fix(returns);
+  if (central.length) {
+    const rest = Math.max(0, total - returns.filter((r) => !isCentral(r)).reduce((s, r) => s + r.targetCfm, 0));
+    distribute(rest, central.map(() => 1)).forEach((v, i) => (central[i].targetCfm = v));
+  } else fix(returns);
   return { ...layout, registers };
 }

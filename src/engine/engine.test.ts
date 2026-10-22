@@ -7,7 +7,7 @@ import { acrossJoists, bootHitsJoist, joistGrid } from './framing';
 import { polygonArea } from './geometry';
 import { assignAirflow, equipmentForTons, simplifiedLoadModel, sizeEquipment, type LoadLine } from './load';
 import { deriveWalls } from './walls';
-import { analyzeBuilding, evaluate, generateProjectLayout, rebalanceAirflow, usableRooms } from './index';
+import { analyzeBuilding, evaluate, generateProjectLayout, rebalanceAirflow, splitRegister, usableRooms } from './index';
 
 const withLayout = (p: Project): Project => ({ ...p, layout: generateProjectLayout(p) });
 const codes = (p: Project) => evaluate(p).warnings.map((w) => w.code);
@@ -420,5 +420,42 @@ describe('framing rules', () => {
   it('marks the layout stale when the framing changes', () => {
     expect(evaluate(base).layoutStale).toBe(false);
     expect(evaluate({ ...base, framing: { ...framing, spacingIn: 16 } }).layoutStale).toBe(true);
+  });
+});
+
+describe('joist bays: every common framing generates a clean layout', () => {
+  const cases = SAMPLE_PLANS.flatMap((plan) =>
+    (['y', 'x'] as const).flatMap((joistDirection) =>
+      [12, 16, 19.2, 24].flatMap((spacingIn) => [7.25, 9.25, 11.25, 14].map((depthIn) => ({ plan, framing: { ...JOISTS(joistDirection), spacingIn, depthIn } }))),
+    ),
+  );
+  it.each(cases)('$plan.id, joists $framing.joistDirection, $framing.spacingIn" o.c., $framing.depthIn" deep', ({ plan, framing }) => {
+    const project = withLayout({ ...buildSampleProject(plan), framing });
+    expect(evaluate(project).warnings.map((w) => w.message)).toEqual([]);
+  });
+});
+
+describe('splitting an oversized register', () => {
+  // The setup from user testing: 12" o.c. joists, 2x12, which leaves a 10.5" wide bay.
+  const framing = { ...JOISTS('x'), spacingIn: 12, depthIn: 11.25 };
+  const base = withLayout({ ...buildSampleProject(SAMPLE_PLANS[0]), framing });
+  const reg = base.layout!.registers.find((r) => r.kind === 'supply' && evaluate(base).branchLength[r.id] > 4)!;
+  const tooBig: Project = { ...base, layout: { ...base.layout!, registers: base.layout!.registers.map((r) => (r.id === reg.id ? { ...r, targetCfm: 600 } : r)) } };
+
+  it('offers a split when a branch cannot fit its bay', () => {
+    const w = evaluate(tooBig).warnings.find((x) => x.code === 'DUCT_DOES_NOT_FIT');
+    expect(w?.fix).toMatchObject({ kind: 'split-register', registerId: reg.id });
+    expect(w!.fix!.parts).toBeGreaterThan(1);
+  });
+
+  it('clears the warning once split, keeping the airflow', () => {
+    const fix = evaluate(tooBig).warnings.find((x) => x.code === 'DUCT_DOES_NOT_FIT')!.fix!;
+    const split: Project = { ...tooBig, layout: splitRegister(tooBig, fix.registerId, fix.parts) };
+    const pieces = split.layout!.registers.filter((r) => r.id === reg.id || r.id.startsWith(`${reg.id}-`));
+    expect(pieces).toHaveLength(fix.parts);
+    expect(pieces.reduce((s, r) => s + r.targetCfm, 0)).toBe(600);
+    expect(new Set(split.layout!.registers.map((r) => r.id)).size).toBe(split.layout!.registers.length);
+    // Only the system total is off (we forced 600 CFM by hand): nothing overlaps or fails to fit.
+    expect(evaluate(split).warnings.map((x) => x.code)).toEqual(['AIRFLOW_MISMATCH']);
   });
 });

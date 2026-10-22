@@ -183,6 +183,8 @@ export interface Warning {
   severity: Severity;
   message: string;
   componentIds: string[];
+  /** A one-step fix the UI can offer. */
+  fix?: { kind: 'split-register'; registerId: string; parts: number };
 }
 
 export interface Project {
