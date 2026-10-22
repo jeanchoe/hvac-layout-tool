@@ -7,7 +7,7 @@ import { addRegister, deleteRegister, draggableKind, generateMissingLayouts, reb
 import { currentFloor, useStore } from '../../state/store';
 import { FloorTabs } from '../FloorTabs';
 import type { Framing, Project } from '../../types';
-import { PlanView } from '../PlanView';
+import { COLORS, PlanView } from '../PlanView';
 import { Scene3D, type ViewRequest, type WallMode } from '../Scene3D';
 import { Button, EstimateBadge, NumberInput, Stat } from '../ui';
 
@@ -88,6 +88,7 @@ export function LayoutStep() {
           >
             <option value="attic">Ducts: in attic</option>
             <option value="joist-bays">Ducts: between joists</option>
+            <option value="plenum">Ducts: ceiling plenum (around beams)</option>
           </select>
           {mode === '3d' && (
             <>
@@ -165,8 +166,8 @@ function Legend() {
   );
   return (
     <div className="pointer-events-none absolute bottom-3 right-3 flex gap-3 rounded-md bg-white/90 px-3 py-1.5 text-xs text-gray-600 shadow-sm ring-1 ring-gray-200">
-      {item('#2563eb', 'Supply')}
-      {item('#64748b', 'Return', true)}
+      {item(COLORS.supply, 'Supply')}
+      {item(COLORS.return, 'Return', true)}
       {item('#dc2626', 'Warning')}
       {item('#f59e0b', 'Selected')}
     </div>
@@ -423,6 +424,7 @@ const DEPTHS: { value: number; label: string }[] = [
 /** Where ducts run, and the joists they must fit between. */
 function FramingPanel({ framing }: { framing: Framing }) {
   const joists = framing.ductSpace === 'joist-bays';
+  const beamCount = useStore((s) => (s.project.beams ?? []).filter((b) => b.floorId === currentFloor(s).id).length);
   const floor = useStore((s) => currentFloor(s));
   const multi = useStore((s) => s.project.floors.length > 1);
   const field = 'rounded-md border border-gray-300 bg-white px-2 py-1 text-sm';
@@ -434,6 +436,7 @@ function FramingPanel({ framing }: { framing: Framing }) {
         <select id="duct-space" className={field} value={framing.ductSpace} onChange={(e) => setFraming({ ductSpace: e.target.value as Framing['ductSpace'] })}>
           <option value="attic">In the attic, over the framing</option>
           <option value="joist-bays">Between joists</option>
+          <option value="plenum">In a ceiling plenum, around beams</option>
         </select>
       </div>
       {joists ? (
@@ -471,6 +474,18 @@ function FramingPanel({ framing }: { framing: Framing }) {
           </div>
           <p className="mt-2 text-xs text-gray-500">
             {multi && 'Joist sizes apply to every floor. '}The trunk crosses the joists in a dropped soffit. Each branch runs along the joists inside one bay and turns rectangular when a round duct is too deep.
+          </p>
+        </>
+      ) : framing.ductSpace === 'plenum' ? (
+        <>
+          <div className="flex items-center justify-between gap-3 py-1 text-sm">
+            <label htmlFor="plenum-depth" className="text-gray-500">Plenum depth (ceiling to deck)</label>
+            <NumberInput className="w-24" value={framing.plenumDepthIn} min={8} max={120} step={1} suffix="in" onChange={(v) => setFraming({ plenumDepthIn: v })} />
+          </div>
+          <p className="mt-1 text-xs text-gray-500">
+            {beamCount
+              ? `Ducts are routed by the shortest practical path from the unit to each diffuser, around ${beamCount} beam${beamCount > 1 ? 's' : ''}: never across a main beam, and under a secondary beam only where the duct fits below it.`
+              : 'Ducts are routed by the shortest practical path from the unit to each diffuser. Draw beams and equipment areas in Trace & scale and the routing avoids them.'}
           </p>
         </>
       ) : (

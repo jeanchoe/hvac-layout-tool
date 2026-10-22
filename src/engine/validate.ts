@@ -1,4 +1,4 @@
-import type { Layout, Room, Warning, Wall } from '../types';
+import type { Beam, EquipmentArea, Layout, Room, Warning, Wall } from '../types';
 import { defaultConfig, type EngineConfig } from './config';
 import { maxCfmForSpace } from './ductSizing';
 import { acrossJoists, bootHitsJoist } from './framing';
@@ -20,7 +20,14 @@ export interface ValidationInput {
   layout: Layout;
   route: RouteResult;
   config?: EngineConfig;
+  /** This floor's beams (for naming them in messages). */
+  beams?: Beam[];
+  /** Where units may go on this floor; none = anywhere. */
+  equipmentAreas?: EquipmentArea[];
 }
+
+/** Beams are named B-1, B-2… in the order they were drawn on their floor. */
+export const beamLabel = (beams: Beam[], id: string) => `B-${beams.findIndex((b) => b.id === id) + 1}`;
 
 export function roomAirflow(rooms: Room[], loads: RoomLoad[], layout: Layout, route: RouteResult): Record<string, RoomAirflow> {
   const out: Record<string, RoomAirflow> = {};
@@ -37,7 +44,7 @@ export function roomAirflow(rooms: Room[], loads: RoomLoad[], layout: Layout, ro
 const fmt = (n: number) => Math.round(n).toLocaleString('en-US');
 
 /** All live validation rules. Recomputed after every edit. */
-export function validate({ rooms, walls, loads, layout, route, config = defaultConfig }: ValidationInput): Warning[] {
+export function validate({ rooms, walls, loads, layout, route, config = defaultConfig, beams = [], equipmentAreas = [] }: ValidationInput): Warning[] {
   const v = config.validation;
   const warnings: Warning[] = [];
   const roomById = new Map(rooms.map((r) => [r.id, r]));
@@ -64,15 +71,28 @@ export function validate({ rooms, walls, loads, layout, route, config = defaultC
     }
   }
 
-  // 2. Branch length.
-  for (const d of route.ducts) {
-    if (d.type !== 'branch' || d.length <= v.maxBranchLengthFt) continue;
+  // 2. Branch length: the run that serves only one register or grille (it may have turns).
+  for (const reg of layout.registers) {
+    const len = route.branchLength[reg.id] ?? 0;
+    if (len <= v.maxBranchLengthFt) continue;
     warnings.push({
-      id: `long-branch-${d.id}`,
+      id: `long-branch-${reg.id}`,
       code: 'BRANCH_TOO_LONG',
       severity: 'warning',
-      message: `${d.side === 'supply' ? 'Supply' : 'Return'} branch is ${d.length.toFixed(1)} ft (max ${v.maxBranchLengthFt} ft).`,
-      componentIds: [d.id, ...(d.registerId ? [d.registerId] : [])],
+      message: `${reg.kind === 'supply' ? 'Supply' : 'Return'} branch is ${len.toFixed(1)} ft (max ${v.maxBranchLengthFt} ft).`,
+      componentIds: [...route.ducts.filter((d) => d.registerId === reg.id && d.type === 'branch').map((d) => d.id), reg.id],
+    });
+  }
+
+  // Beams: ducts never cross a main beam.
+  for (const c of route.beamCrossings) {
+    if (c.kind !== 'main') continue;
+    warnings.push({
+      id: `main-beam-${c.ductId}-${c.beamId}`,
+      code: 'DUCT_CROSSES_MAIN_BEAM',
+      severity: 'error',
+      message: `A duct crosses main beam ${beamLabel(beams, c.beamId)}, and there is no other route. Move the unit or the register, or mark the beam as secondary if the duct can pass under it.`,
+      componentIds: [c.ductId, c.beamId],
     });
   }
 
@@ -108,7 +128,14 @@ export function validate({ rooms, walls, loads, layout, route, config = defaultC
   for (const d of route.ducts) {
     if (d.fits) continue;
     const inches = (v = 0) => `${Math.round(v * 10) / 10}"`;
-    const where = d.type === 'branch' ? `${inches(route.grid?.clearWidthIn)} wide × ${inches(d.maxHeightIn)} deep joist bay` : `${inches(d.maxHeightIn)} soffit`;
+    const underBeams = [...new Set(route.beamCrossings.filter((c) => c.ductId === d.id && c.kind === 'secondary').map((c) => beamLabel(beams, c.beamId)))];
+    const where = underBeams.length
+      ? `${inches(d.maxHeightIn)} space under beam ${underBeams.join(', ')}`
+      : !route.grid
+        ? `${inches(d.maxHeightIn)} ceiling plenum`
+        : d.type === 'branch'
+          ? `${inches(route.grid?.clearWidthIn)} wide × ${inches(d.maxHeightIn)} deep joist bay`
+          : `${inches(d.maxHeightIn)} soffit`;
     warnings.push({
       id: `no-fit-${d.id}`,
       code: 'DUCT_DOES_NOT_FIT',
@@ -131,7 +158,11 @@ export function validate({ rooms, walls, loads, layout, route, config = defaultC
     }
   }
 
-  if (!rooms.some((r) => pointInPolygon(ahu.position, r.polygon))) {
+  const inArea = equipmentAreas.some((a) => pointInPolygon(ahu.position, a.polygon));
+  if (equipmentAreas.length && !inArea) {
+    warnings.push({ id: 'unit-outside-area', code: 'UNIT_OUTSIDE_EQUIPMENT_AREA', severity: 'warning', message: 'The air handler is outside the equipment areas marked on this floor.', componentIds: [ahu.id] });
+  } else if (!inArea && !rooms.some((r) => pointInPolygon(ahu.position, r.polygon))) {
+    // A unit in a marked area (a roof or mezzanine) may sit outside the traced rooms.
     warnings.push({ id: 'ahu-outside', code: 'AHU_OUTSIDE_BUILDING', severity: 'warning', message: 'The air handler is outside the traced rooms.', componentIds: [ahu.id] });
   }
 

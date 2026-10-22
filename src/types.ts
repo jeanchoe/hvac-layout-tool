@@ -106,8 +106,12 @@ export interface DesignInputs {
 
 /** Where ducts run, and the framing they have to fit around. */
 export interface Framing {
-  /** 'attic': flex duct laid over the ceiling framing. 'joist-bays': ducts run inside the joist spaces. */
-  ductSpace: 'attic' | 'joist-bays';
+  /**
+   * 'attic': flex duct laid over the ceiling framing. 'joist-bays': ducts run inside the joist
+   * spaces. 'plenum': a ceiling plenum under a structural deck with beams; ducts are routed by
+   * pathfinding around the beams.
+   */
+  ductSpace: 'attic' | 'joist-bays' | 'plenum';
   /** Direction the joists run: 'x' = east-west, 'y' = north-south. */
   joistDirection: 'x' | 'y';
   /** Joist spacing, on centre (in). */
@@ -116,6 +120,30 @@ export interface Framing {
   depthIn: number;
   /** Deepest dropped soffit allowed for the trunk, which runs across the joists (in). */
   soffitDepthIn: number;
+  /** Ceiling plenum: clear height from the ceiling to the underside of the deck (in). */
+  plenumDepthIn: number;
+}
+
+/**
+ * A structural beam in a ceiling plenum. Ducts never cross a main beam (girder); they may drop
+ * under a secondary beam if they fit in the space below it.
+ */
+export interface Beam {
+  id: string;
+  floorId: string;
+  a: Pt;
+  b: Pt;
+  kind: 'main' | 'secondary';
+  /** Depth below the deck (in). */
+  depthIn: number;
+}
+
+/** Where main units may go on a floor: a mechanical room, roof area, mezzanine or closet. */
+export interface EquipmentArea {
+  id: string;
+  floorId: string;
+  name: string;
+  polygon: Pt[];
 }
 
 /** Derived from room polygons; never stored. One per room edge. */
@@ -204,7 +232,9 @@ export interface Warning {
     | 'AIRFLOW_MISMATCH'
     | 'AHU_OUTSIDE_BUILDING'
     | 'DUCT_DOES_NOT_FIT'
-    | 'REGISTER_ON_JOIST';
+    | 'REGISTER_ON_JOIST'
+    | 'DUCT_CROSSES_MAIN_BEAM'
+    | 'UNIT_OUTSIDE_EQUIPMENT_AREA';
   severity: Severity;
   message: string;
   componentIds: string[];
@@ -225,6 +255,10 @@ export interface Project {
   design?: DesignInputs;
   /** Duct space and framing (optional; defaults to ducts in the attic). */
   framing?: Framing;
+  /** Structural beams, per floor (optional). */
+  beams?: Beam[];
+  /** Areas where main units may be placed, per floor (optional; none = anywhere). */
+  equipmentAreas?: EquipmentArea[];
   /** One duct system per floor, keyed by floor id. */
   layouts: Record<string, Layout>;
   createdAt: string;

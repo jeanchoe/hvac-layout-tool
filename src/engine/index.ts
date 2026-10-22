@@ -71,10 +71,12 @@ export const usableRooms = (rooms: Room[]) => rooms.filter((r) => r.polygon.leng
 export const defaultFloorId = (project: Project) => sortedFloors(project.floors)[0]?.id ?? '';
 
 /** Stable signature of everything about the rooms and framing that affects a floor's layout. */
-export function roomsSignature(rooms: Room[], framing?: Framing): string {
+export function roomsSignature(rooms: Room[], framing?: Framing, objects?: ReturnType<typeof floorObjects>): string {
   const s = JSON.stringify([
     rooms.map((r) => [r.id, r.polygon.map((p) => [p.x.toFixed(2), p.y.toFixed(2)]), r.ceilingHeight, r.floorType, r.isBedroom, r.exteriorOverrides, r.windows.map((w) => [w.wallId, w.count, w.width, w.height])]),
     framing ?? null,
+    // Beams and equipment areas change where the unit should go, so they make a layout stale too.
+    objects && (objects.beams.length || objects.equipmentAreas.length) ? objects : null,
   ]);
   let h = 5381;
   for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
@@ -111,6 +113,14 @@ export function analyzeBuilding(project: Project, opts: EngineOptions = {}): Bui
   return { climate, design, framing, floors: project.floors, rooms, walls, loads, totals: sumTotals(loads), byFloor, loadModelName: model.name };
 }
 
+/** A floor's beams and equipment areas. */
+export function floorObjects(project: Project, floorId: string) {
+  return {
+    beams: (project.beams ?? []).filter((b) => b.floorId === floorId),
+    equipmentAreas: (project.equipmentAreas ?? []).filter((a) => a.floorId === floorId),
+  };
+}
+
 /** One floor's slice of the building analysis. */
 function floorSlice(a: BuildingAnalysis, floorId: string) {
   const rooms = a.rooms.filter((r) => r.floorId === floorId);
@@ -134,8 +144,9 @@ export function evaluate(project: Project, opts: EngineOptions & { floorId?: str
   if (!layout || f.rooms.length === 0) {
     return { ...base, ducts: [], branchLength: {}, airflow: {}, warnings: [], score: null, layoutStale: false, grid: null };
   }
-  const route = routeDucts(f.rooms, layout, config, framing);
-  const warnings = validate({ rooms: f.rooms, walls: f.walls, loads: f.loads, layout, route, config });
+  const { beams, equipmentAreas } = floorObjects(project, floorId);
+  const route = routeDucts(f.rooms, layout, config, framing, beams);
+  const warnings = validate({ rooms: f.rooms, walls: f.walls, loads: f.loads, layout, route, config, beams, equipmentAreas });
   return {
     ...base,
     ducts: route.ducts,
@@ -143,7 +154,7 @@ export function evaluate(project: Project, opts: EngineOptions & { floorId?: str
     airflow: roomAirflow(f.rooms, f.loads, layout, route),
     warnings,
     score: scoreLayout(f.rooms, f.loads, layout, route, warnings, config),
-    layoutStale: layout.roomsSignature !== roomsSignature(roomsOnFloor(project.rooms, floorId), framing),
+    layoutStale: layout.roomsSignature !== roomsSignature(roomsOnFloor(project.rooms, floorId), framing, floorObjects(project, floorId)),
     grid: route.grid,
   };
 }
@@ -169,7 +180,8 @@ export function generateProjectLayout(project: Project, opts: EngineOptions & { 
     config,
     airHandlerPosition: opts.airHandlerPosition,
     framing: floorFraming(project, floorId, config),
-    roomsSignature: roomsSignature(roomsOnFloor(project.rooms, floorId), floorFraming(project, floorId, config)),
+    roomsSignature: roomsSignature(roomsOnFloor(project.rooms, floorId), floorFraming(project, floorId, config), floorObjects(project, floorId)),
+    ...floorObjects(project, floorId),
   }).layout;
 }
 

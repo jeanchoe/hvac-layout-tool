@@ -6,7 +6,7 @@ import { newId } from '../lib/ids';
 
 export const STEPS = ['Start', 'Upload', 'Trace & scale', 'Room details', 'Layout & inspect', 'Export'] as const;
 export type StepIndex = 0 | 1 | 2 | 3 | 4 | 5;
-export type TraceTool = 'select' | 'scale' | 'draw' | 'align';
+export type TraceTool = 'select' | 'scale' | 'draw' | 'align' | 'beam' | 'area';
 
 const HISTORY_LIMIT = 200;
 const COALESCE_MS = 1200;

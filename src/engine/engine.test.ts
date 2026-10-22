@@ -5,6 +5,7 @@ import { climateForZip, defaultConfig, resolveDesign, type EngineConfig } from '
 import { branchEfficiency, fitDuct, rectEquivalentDiameter, sizeDuct } from './ductSizing';
 import { acrossJoists, bootHitsJoist, joistGrid } from './framing';
 import { polygonArea } from './geometry';
+import { routeTree } from './pathfind';
 import { assignAirflow, equipmentForTons, simplifiedLoadModel, sizeEquipment, type LoadLine } from './load';
 import { deriveWalls } from './walls';
 import { analyzeBuilding, defaultFloorId, floorElevations, floorFraming, newFloor, roomExposure, evaluate, evaluateAll, generateAllLayouts, migrateProject, rebalanceAirflow, roomsOnFloor, splitRegister, usableRooms } from './index';
@@ -382,7 +383,7 @@ describe('rectangular ducts', () => {
   });
 });
 
-const JOISTS = (joistDirection: Framing['joistDirection']): Framing => ({ ductSpace: 'joist-bays', joistDirection, spacingIn: 24, depthIn: 9.25, soffitDepthIn: 14 });
+const JOISTS = (joistDirection: Framing['joistDirection']): Framing => ({ ductSpace: 'joist-bays', joistDirection, spacingIn: 24, depthIn: 9.25, soffitDepthIn: 14, plenumDepthIn: 30 });
 
 describe.each(SAMPLE_PLANS.flatMap((plan) => (['y', 'x'] as const).map((dir) => ({ plan, dir }))))('joist bays: $plan.name, joists along $dir', ({ plan, dir }) => {
   const framing = JOISTS(dir);
@@ -546,5 +547,106 @@ describe('multiple floors', () => {
       expect(r.rooms.every((room) => room.floorId === r.floorId)).toBe(true);
     }
     expect(all.f1.building.totals.areaSqFt).toBe(2528);
+  });
+});
+
+describe('ceiling plenum: pathfinding around beams', () => {
+  const PLENUM: Framing = { ...defaultConfig.framingDefaults, ductSpace: 'plenum', plenumDepthIn: 30 };
+  const room = box('hall', 0, 0, 40, 20);
+  const beam = (id: string, a: { x: number; y: number }, b: { x: number; y: number }, kind: 'main' | 'secondary', depthIn = 18) => ({ id, floorId: 'f1', a, b, kind, depthIn });
+  const total = (t: ReturnType<typeof routeTree>) => t.segments.reduce((s, x) => s + Math.hypot(x.end.x - x.start.x, x.end.y - x.start.y), 0);
+
+  it('runs straight with no elbows when the way is clear', () => {
+    const t = routeTree([room], [], { x: 5, y: 10 }, [{ id: 'a', at: { x: 35, y: 10 }, cfm: 100 }], defaultConfig);
+    expect(t.turns).toBe(0);
+    expect(total(t)).toBeCloseTo(30, 0);
+  });
+
+  it('shares a main between terminals and sizes it for both', () => {
+    const t = routeTree([room], [], { x: 2, y: 10 }, [
+      { id: 'a', at: { x: 38, y: 4 }, cfm: 100 },
+      { id: 'b', at: { x: 38, y: 16 }, cfm: 150 },
+    ], defaultConfig);
+    const main = t.segments.filter((x) => x.terminalCount === 2);
+    expect(main.length).toBeGreaterThan(0);
+    expect(main.every((x) => x.cfm === 250)).toBe(true);
+    expect(t.tees).toBe(1);
+    // Shared routing is shorter than two separate runs.
+    expect(total(t)).toBeLessThan(2 * (36 + 6));
+  });
+
+  it('goes around a main beam through a gap rather than crossing it', () => {
+    const wallBeam = beam('b1', { x: 20, y: -1 }, { x: 20, y: 14 }, 'main');
+    const t = routeTree([room], [wallBeam], { x: 5, y: 5 }, [{ id: 'a', at: { x: 35, y: 5 }, cfm: 100 }], defaultConfig);
+    expect(t.segments.flatMap((x) => x.crossings)).toEqual([]);
+    expect(Math.max(...t.segments.flatMap((x) => [x.start.y, x.end.y]))).toBeGreaterThan(14);
+  });
+
+  it('never runs along a main beam, and only runs along a secondary beam by passing under it', () => {
+    const along = beam('m', { x: 0, y: 10 }, { x: 40, y: 10 }, 'main');
+    const t = routeTree([room], [along], { x: 2, y: 10 }, [{ id: 'a', at: { x: 38, y: 10 }, cfm: 100 }], defaultConfig);
+    expect(t.segments.flatMap((x) => x.crossings).filter((c) => c.kind === 'main').length).toBeLessThanOrEqual(2); // only where the unit and diffuser sit on it
+    const sec = beam('s', { x: 0, y: 10 }, { x: 40, y: 10 }, 'secondary');
+    const t2 = routeTree([room], [sec], { x: 2, y: 6 }, [{ id: 'a', at: { x: 38, y: 6 }, cfm: 100 }], defaultConfig);
+    expect(t2.segments.flatMap((x) => x.crossings)).toEqual([]); // the clear route beside the beam wins
+  });
+
+  it('flags a main beam that cannot be avoided', () => {
+    const p: Project = { ...buildSampleProject(SAMPLE_PLANS[0]), framing: PLENUM };
+    const b = analyzeBuilding(p).rooms.flatMap((r) => r.polygon);
+    const xs = b.map((q) => q.x);
+    const ys = b.map((q) => q.y);
+    const midX = (Math.min(...xs) + Math.max(...xs)) / 2;
+    const withBeam: Project = { ...p, beams: [beam('b1', { x: midX, y: Math.min(...ys) - 1 }, { x: midX, y: Math.max(...ys) + 1 }, 'main')] };
+    const laid = withLayout(withBeam);
+    expect(evaluate(laid).warnings.some((w) => w.code === 'DUCT_CROSSES_MAIN_BEAM')).toBe(true);
+  });
+
+  it('drops under a secondary beam and flattens the duct to fit below it', () => {
+    const p: Project = { ...buildSampleProject(SAMPLE_PLANS[0]), framing: PLENUM };
+    const ys = analyzeBuilding(p).rooms.flatMap((r) => r.polygon.map((q) => q.y));
+    const xs = analyzeBuilding(p).rooms.flatMap((r) => r.polygon.map((q) => q.x));
+    const beams = [20, 30, 40].map((x, i) => beam(`s${i}`, { x: Math.min(...xs) + x, y: Math.min(...ys) - 1 }, { x: Math.min(...xs) + x, y: Math.max(...ys) + 1 }, 'secondary', 20));
+    const laid = withLayout({ ...p, beams });
+    const r = evaluate(laid);
+    expect(r.warnings).toEqual([]);
+    const under = r.ducts.filter((d) => r.building && d.maxHeightIn !== undefined && d.maxHeightIn < 29);
+    expect(under.length).toBeGreaterThan(0);
+    for (const d of under) expect(d.maxHeightIn).toBe(30 - 20 - 1);
+    for (const d of under) expect(d.shape === 'round' ? d.diameter : d.heightIn!).toBeLessThanOrEqual(9);
+  });
+
+  it('reports a duct too big to pass under a deep secondary beam', () => {
+    const p: Project = { ...buildSampleProject(SAMPLE_PLANS[0]), framing: PLENUM };
+    const pts = analyzeBuilding(p).rooms.flatMap((r) => r.polygon);
+    const minY = Math.min(...pts.map((q) => q.y));
+    const maxY = Math.max(...pts.map((q) => q.y));
+    const minX = Math.min(...pts.map((q) => q.x));
+    const laid = withLayout({ ...p, beams: [10, 20, 30, 40, 50].map((x, i) => beam(`d${i}`, { x: minX + x, y: minY - 1 }, { x: minX + x, y: maxY + 1 }, 'secondary', 28)) });
+    const w = evaluate(laid).warnings.find((x) => x.code === 'DUCT_DOES_NOT_FIT');
+    expect(w?.message).toMatch(/under beam B-\d/);
+  });
+
+  it('places the unit inside a marked equipment area and flags it when moved out', () => {
+    const p = buildSampleProject(SAMPLE_PLANS[0]);
+    const area = { id: 'mech', floorId: 'f1', name: 'Mech closet', polygon: [{ x: 6, y: 19 }, { x: 11, y: 19 }, { x: 11, y: 22 }, { x: 6, y: 22 }] };
+    const laid = withLayout({ ...p, equipmentAreas: [area] });
+    const ahu = layoutOf(laid).airHandler.position;
+    expect(ahu.x).toBeGreaterThanOrEqual(6);
+    expect(ahu.x).toBeLessThanOrEqual(11);
+    expect(ahu.y).toBeGreaterThanOrEqual(19);
+    expect(ahu.y).toBeLessThanOrEqual(22);
+    expect(codes(laid)).not.toContain('UNIT_OUTSIDE_EQUIPMENT_AREA');
+    const moved = withFloorLayout(laid, { ...layoutOf(laid), airHandler: { ...layoutOf(laid).airHandler, position: { x: 40, y: 15 } } });
+    expect(codes(moved)).toContain('UNIT_OUTSIDE_EQUIPMENT_AREA');
+  });
+
+  it.each(SAMPLE_PLANS)('routes $name in a plenum with no warnings, fast enough to drag', (plan) => {
+    const project = withLayout({ ...buildSampleProject(plan), framing: PLENUM });
+    const all = evaluateAll(project);
+    expect(Object.values(all).flatMap((r) => r.warnings.map((w) => w.message))).toEqual([]);
+    const t0 = performance.now();
+    for (let i = 0; i < 5; i++) evaluateAll(project);
+    expect((performance.now() - t0) / 5).toBeLessThan(200);
   });
 });

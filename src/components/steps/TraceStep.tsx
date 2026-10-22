@@ -5,7 +5,7 @@ import { fmtSqFt, parseFeet } from '../../lib/format';
 import { sortedFloors } from '../../engine';
 import { currentFloor, useStore, type TraceTool } from '../../state/store';
 import { FloorTabs } from '../FloorTabs';
-import type { Pt, Room } from '../../types';
+import type { Beam, EquipmentArea, Pt, Room } from '../../types';
 import { Button, Kbd, inputClass } from '../ui';
 import { BLANK_GRID } from './UploadStep';
 
@@ -47,13 +47,18 @@ export function TraceStep() {
   /** Edits this floor inside an update. */
   const floorIn = (d: { floors: typeof project.floors }) => d.floors.find((f) => f.id === floor.id)!;
   const size = bg ? { w: bg.width, h: bg.height } : { w: BLANK_GRID.width, h: BLANK_GRID.height };
-  const effectiveTool: TraceTool = !scale && (tool === 'draw' || tool === 'align') ? 'scale' : tool === 'align' && !below ? 'select' : tool;
+  const needsScale = tool === 'draw' || tool === 'align' || tool === 'beam' || tool === 'area';
+  const effectiveTool: TraceTool = !scale && needsScale ? 'scale' : tool === 'align' && !below ? 'select' : tool;
+  const beams = (project.beams ?? []).filter((b) => b.floorId === floor.id);
+  const areas = (project.equipmentAreas ?? []).filter((a) => a.floorId === floor.id);
+  const polygonTool = effectiveTool === 'draw' || effectiveTool === 'area';
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const [view, setView] = useState<View>({ x: 0, y: 0, k: 1 });
   const [cursor, setCursor] = useState<Pt | null>(null);
   const [draft, setDraft] = useState<Pt[]>([]);
   const [scaleDraft, setScaleDraft] = useState<Pt[]>([]);
+  const [beamStart, setBeamStart] = useState<Pt | null>(null);
   const [scaleInput, setScaleInput] = useState('');
   const [ortho, setOrtho] = useState(true);
   const [shiftHeld, setShiftHeld] = useState(false);
@@ -101,6 +106,14 @@ export function TraceStep() {
 
   const closeDraft = () => {
     if (draft.length < 3 || !scale) return;
+    if (effectiveTool === 'area') {
+      const area: EquipmentArea = { id: newId('ea'), floorId: floor.id, name: `Equipment area ${areas.length + 1}`, polygon: draft.map(pxToFt) };
+      if (polygonArea(area.polygon) < 2) return;
+      update((d) => void (d.equipmentAreas = [...(d.equipmentAreas ?? []), area]));
+      setDraft([]);
+      select(area.id);
+      return;
+    }
     const room = newRoom(`Room ${project.rooms.length + 1}`, draft.map(pxToFt), floor.id);
     if (polygonArea(room.polygon) < 4) return;
     update((d) => void d.rooms.push(room));
@@ -130,7 +143,17 @@ export function TraceStep() {
   };
 
   const onClickCanvas = (p: Pt) => {
-    if (effectiveTool === 'draw') {
+    if (effectiveTool === 'beam') {
+      if (!beamStart) return setBeamStart(snap(p, null));
+      const end = snap(p, beamStart);
+      if (dist(end, beamStart) < 3) return;
+      const beam: Beam = { id: newId('bm'), floorId: floor.id, a: pxToFt(beamStart), b: pxToFt(end), kind: 'secondary', depthIn: 18 };
+      update((d) => void (d.beams = [...(d.beams ?? []), beam]));
+      setBeamStart(null);
+      select(beam.id);
+      return;
+    }
+    if (polygonTool) {
       if (draft.length >= 3 && dist(p, draft[0]) < SNAP_PX / view.k) return closeDraft();
       const s = snap(p, draft[draft.length - 1] ?? null);
       if (draft.length && dist(s, draft[draft.length - 1]) < 0.5) return;
@@ -154,11 +177,16 @@ export function TraceStep() {
       if (e.key === 'Escape') {
         setDraft([]);
         setScaleDraft([]);
+        setBeamStart(null);
       }
       if (e.key === 'Enter') closeDraft();
       if (e.key === 'Backspace' && draft.length) setDraft(draft.slice(0, -1));
-      else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId && rooms.some((r) => r.id === selectedId)) {
-        update((d) => void (d.rooms = d.rooms.filter((r) => r.id !== selectedId)));
+      else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId && (rooms.some((r) => r.id === selectedId) || beams.some((b) => b.id === selectedId) || areas.some((a) => a.id === selectedId))) {
+        update((d) => {
+          d.rooms = d.rooms.filter((r) => r.id !== selectedId);
+          d.beams = (d.beams ?? []).filter((b) => b.id !== selectedId);
+          d.equipmentAreas = (d.equipmentAreas ?? []).filter((a) => a.id !== selectedId);
+        });
         select(null);
       }
       if (!e.ctrlKey && !e.metaKey) {
@@ -166,6 +194,8 @@ export function TraceStep() {
         if (e.key === 'd') setTool('draw');
         if (e.key === 's') setTool('scale');
         if (e.key === 'a' && below) setTool('align');
+        if (e.key === 'b') setTool('beam');
+        if (e.key === 'e') setTool('area');
       }
     };
     const up = (e: KeyboardEvent) => {
@@ -201,7 +231,8 @@ export function TraceStep() {
   const onPointerMove = (e: React.PointerEvent) => {
     const p = toImg(e);
     const d = drag.current;
-    if (effectiveTool === 'draw') setCursor(snap(p, draft[draft.length - 1] ?? null));
+    if (polygonTool) setCursor(snap(p, draft[draft.length - 1] ?? null));
+    else if (effectiveTool === 'beam') setCursor(snap(p, beamStart));
     else if (effectiveTool === 'scale') setCursor(scaleDraft.length === 1 ? snap(p, scaleDraft[0]) : p);
     else setCursor(p);
     if (!d) return;
@@ -347,9 +378,42 @@ export function TraceStep() {
                 </g>
               )}
 
+              {scale &&
+                areas.map((a) => {
+                  const pts = a.polygon.map(ftToPx);
+                  const c = ftToPx(centroid(a.polygon));
+                  const sel = a.id === selectedId;
+                  return (
+                    <g key={a.id} style={{ pointerEvents: effectiveTool === 'select' ? 'auto' : 'none', cursor: 'pointer' }} onPointerDown={(e) => (e.stopPropagation(), select(a.id))}>
+                      <polygon points={pts.map((p) => `${p.x},${p.y}`).join(' ')} fill="rgb(16 185 129 / 0.14)" stroke="#059669" strokeWidth={(sel ? 3 : 1.5) / k} strokeDasharray={`${5 / k} ${3 / k}`} />
+                      <text x={c.x} y={c.y} textAnchor="middle" fontSize={11 / k} fontWeight={600} fill="#047857" stroke="#fff" strokeWidth={3 / k} style={{ paintOrder: 'stroke' }}>
+                        {a.name}
+                      </text>
+                    </g>
+                  );
+                })}
+              {scale &&
+                beams.map((bm, i) => {
+                  const a = ftToPx(bm.a);
+                  const b = ftToPx(bm.b);
+                  const sel = bm.id === selectedId;
+                  return (
+                    <g key={bm.id} style={{ pointerEvents: effectiveTool === 'select' ? 'auto' : 'none', cursor: 'pointer' }} onPointerDown={(e) => (e.stopPropagation(), select(bm.id))}>
+                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="transparent" strokeWidth={12 / k} />
+                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={sel ? '#f59e0b' : bm.kind === 'main' ? '#7f1d1d' : '#57534e'} strokeWidth={(bm.kind === 'main' ? 5 : 3) / k} strokeDasharray={bm.kind === 'main' ? undefined : `${8 / k} ${4 / k}`} />
+                      <text x={(a.x + b.x) / 2} y={(a.y + b.y) / 2 - 6 / k} textAnchor="middle" fontSize={10 / k} fontWeight={700} fill={bm.kind === 'main' ? '#7f1d1d' : '#44403c'} stroke="#fff" strokeWidth={3 / k} style={{ paintOrder: 'stroke' }}>
+                        B-{i + 1}
+                      </text>
+                    </g>
+                  );
+                })}
+              {beamStart && cursor && (
+                <line x1={beamStart.x} y1={beamStart.y} x2={cursor.x} y2={cursor.y} stroke="#57534e" strokeWidth={3 / k} strokeDasharray={`${8 / k} ${4 / k}`} style={{ pointerEvents: 'none' }} />
+              )}
+
               {draft.length > 0 && (
                 <g style={{ pointerEvents: 'none' }}>
-                  <polyline points={[...draft, ...(cursor ? [cursor] : [])].map((p) => `${p.x},${p.y}`).join(' ')} fill="rgb(37 99 235 / 0.08)" stroke="#2563eb" strokeWidth={2 / k} />
+                  <polyline points={[...draft, ...(cursor ? [cursor] : [])].map((p) => `${p.x},${p.y}`).join(' ')} fill={effectiveTool === 'area' ? 'rgb(16 185 129 / 0.10)' : 'rgb(37 99 235 / 0.08)'} stroke={effectiveTool === 'area' ? '#059669' : '#2563eb'} strokeWidth={2 / k} />
                   {draft.map((p, i) => (
                     <circle key={i} cx={p.x} cy={p.y} r={(i === 0 ? 6 : 3.5) / k} fill={i === 0 ? '#fff' : '#2563eb'} stroke="#2563eb" strokeWidth={stroke} />
                   ))}
@@ -371,12 +435,14 @@ export function TraceStep() {
               ['select', 'Select', 'V'],
               ['scale', 'Set scale', 'S'],
               ['draw', 'Draw room', 'D'],
+              ['beam', 'Beam', 'B'],
+              ['area', 'Equipment area', 'E'],
               ...(below ? ([['align', `Align to ${below.name}`, 'A']] as const) : []),
             ] as const
           ).map(([id, label, key]) => (
             <button
               key={id}
-              disabled={(id === 'draw' || id === 'align') && !scale}
+              disabled={id !== 'select' && id !== 'scale' && !scale}
               title={id === 'draw' && !scale ? 'Set the scale first' : `${label} (${key})`}
               onClick={() => setTool(id)}
               className={`rounded-md px-3 py-1 text-sm disabled:opacity-40 ${effectiveTool === id ? 'bg-accent text-white' : 'text-gray-700 hover:bg-gray-100'}`}
@@ -450,6 +516,37 @@ export function TraceStep() {
             </li>
           ))}
           {rooms.length === 0 && <li className="px-2 py-4 text-xs text-gray-500">No rooms yet. Use “Draw room” to click around each room’s corners.</li>}
+          {(beams.length > 0 || areas.length > 0 || effectiveTool === 'beam' || effectiveTool === 'area') && (
+            <>
+              <li className="mt-3 flex items-center justify-between px-2 pb-1 text-sm font-semibold">
+                Beams ({beams.length})<span className="text-xs font-normal text-gray-500">main = ducts never cross</span>
+              </li>
+              {beams.map((bm, i) => (
+                <li key={bm.id} className={`mb-1 flex items-center gap-2 rounded-md px-2 py-1.5 text-sm ${bm.id === selectedId ? 'bg-accent-soft' : 'hover:bg-gray-50'}`} onClick={() => select(bm.id)}>
+                  <span className="w-9 shrink-0 font-semibold text-stone-700">B-{i + 1}</span>
+                  <select aria-label={`Beam B-${i + 1} type`} className="rounded border border-gray-200 bg-white px-1 py-0.5 text-xs" value={bm.kind} onChange={(e) => update((d) => void (d.beams!.find((x) => x.id === bm.id)!.kind = e.target.value as Beam['kind']))}>
+                    <option value="secondary">Secondary</option>
+                    <option value="main">Main</option>
+                  </select>
+                  <input aria-label={`Beam B-${i + 1} depth`} type="number" min={4} max={60} className="w-14 rounded border border-gray-200 px-1 py-0.5 text-xs" value={bm.depthIn} onChange={(e) => Number(e.target.value) > 0 && update((d) => void (d.beams!.find((x) => x.id === bm.id)!.depthIn = Number(e.target.value)), { coalesce: `beam-depth-${bm.id}` })} />
+                  <span className="text-xs text-gray-400">in deep</span>
+                  <button title="Delete beam" className="ml-auto shrink-0 text-gray-300 hover:text-danger" onClick={(e) => (e.stopPropagation(), update((d) => void (d.beams = d.beams!.filter((x) => x.id !== bm.id))))}>
+                    ✕
+                  </button>
+                </li>
+              ))}
+              <li className="mt-3 px-2 pb-1 text-sm font-semibold">Equipment areas ({areas.length})</li>
+              {areas.map((a) => (
+                <li key={a.id} className={`mb-1 flex items-center gap-2 rounded-md px-2 py-1.5 ${a.id === selectedId ? 'bg-accent-soft' : 'hover:bg-gray-50'}`} onClick={() => select(a.id)}>
+                  <input aria-label="Equipment area name" className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 text-sm hover:border-gray-200 focus:border-accent focus:bg-white focus:outline-none" value={a.name} onChange={(e) => update((d) => void (d.equipmentAreas!.find((x) => x.id === a.id)!.name = e.target.value), { coalesce: `area-name-${a.id}` })} />
+                  <span className="shrink-0 text-xs tabular-nums text-gray-500">{Math.round(polygonArea(a.polygon))} ft²</span>
+                  <button title="Delete equipment area" className="shrink-0 text-gray-300 hover:text-danger" onClick={(e) => (e.stopPropagation(), update((d) => void (d.equipmentAreas = d.equipmentAreas!.filter((x) => x.id !== a.id))))}>
+                    ✕
+                  </button>
+                </li>
+              ))}
+            </>
+          )}
         </ul>
         <div className="border-t border-gray-100 p-4">
           <Button variant="primary" className="w-full" disabled={!project.rooms.length} onClick={() => setStep(3)}>
@@ -466,6 +563,10 @@ function TraceHelp({ tool, hasScale, drafting, belowName }: { tool: TraceTool; h
   const lines: React.ReactNode[] =
     tool === 'align'
       ? [`Drag to slide ${belowName}'s outline (orange, dashed) until it lines up with this plan's outside walls or stairs.`, 'Rooms on this floor stay where they are on the image.']
+      : tool === 'beam'
+      ? ['Click both ends of a beam. Main beams (girders) are never crossed by ducts; ducts may drop under secondary beams if they fit below them.', 'Set each beam’s type and depth in the list. Beams are used when ducts run in a ceiling plenum.']
+      : tool === 'area'
+      ? ['Click the corners of a space where main units may go: a mechanical room, mezzanine, roof area or closet. Close it like a room.', 'When a floor has equipment areas, its air handler is only placed inside one.']
       : tool === 'scale'
       ? ['Click both ends of a wall or dimension whose length you know, then type its length.', hasScale ? 'Re-setting the scale keeps traced rooms on the image.' : 'You need a scale before drawing rooms.']
       : tool === 'draw'

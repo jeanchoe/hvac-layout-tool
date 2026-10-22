@@ -140,7 +140,15 @@ function FloorContent({ project, result, elevation, ghost, selectedId, wallMode,
   const framingDepthFt = grid ? grid.framing.depthIn / 12 : atticJoistFt;
   const halfHeight = (d: DuctSegment) => (d.shape === 'rect' ? d.heightIn! : d.diameter) / 24;
   const supplyTrunkFt = Math.max(0, ...result.ducts.filter((d) => d.side === 'supply' && d.type === 'trunk').map((d) => halfHeight(d) * 2));
+  const plenum = result.framing.ductSpace === 'plenum';
+  const deck = maxCeiling + result.framing.plenumDepthIn / 12;
+  const plenumFull = result.framing.plenumDepthIn - defaultConfig.pathfinding.beamClearanceIn;
   const ductHeight = (d: DuctSegment) => {
+    if (plenum) {
+      // Ducts hang just under the deck; a run that drops under a beam sits in the space below it.
+      const under = d.maxHeightIn !== undefined && d.maxHeightIn < plenumFull - 1e-6;
+      return under ? maxCeiling + d.maxHeightIn! / 12 - halfHeight(d) : deck - 0.08 - halfHeight(d);
+    }
     if (grid) {
       // Branches sit inside the joist depth; trunks hang below the joists in a soffit.
       return d.type === 'branch' ? maxCeiling + grid.framing.depthIn / 24 : maxCeiling - halfHeight(d);
@@ -178,7 +186,25 @@ function FloorContent({ project, result, elevation, ghost, selectedId, wallMode,
             );
           })}
 
-      {showFraming && framingGrid && <Joists rooms={result.rooms} grid={framingGrid} ceiling={maxCeiling} depthFt={framingDepthFt} attic={!grid} />}
+      {showFraming && !plenum && framingGrid && <Joists rooms={result.rooms} grid={framingGrid} ceiling={maxCeiling} depthFt={framingDepthFt} attic={!grid} />}
+      {showFraming &&
+        (project.beams ?? [])
+          .filter((bm) => bm.floorId === result.floorId)
+          .map((bm) => {
+            const len = Math.hypot(bm.b.x - bm.a.x, bm.b.y - bm.a.y);
+            const depth = bm.depthIn / 12;
+            return (
+              <mesh key={bm.id} position={[(bm.a.x + bm.b.x) / 2, deck - depth / 2, (bm.a.y + bm.b.y) / 2]} rotation-y={-Math.atan2(bm.b.y - bm.a.y, bm.b.x - bm.a.x)} raycast={() => null}>
+                <boxGeometry args={[len, depth, bm.kind === 'main' ? 0.75 : 0.5]} />
+                <meshStandardMaterial color={bm.kind === 'main' ? '#7f1d1d' : '#78716c'} metalness={0.4} roughness={0.5} />
+              </mesh>
+            );
+          })}
+      {(project.equipmentAreas ?? [])
+        .filter((a) => a.floorId === result.floorId)
+        .map((a) => (
+          <EquipmentPatch key={a.id} polygon={a.polygon} />
+        ))}
 
       {showLabels &&
         result.rooms.map((room) => {
@@ -198,7 +224,7 @@ function FloorContent({ project, result, elevation, ghost, selectedId, wallMode,
             const id = isTrunk ? 'trunk' : d.id;
             return (
               <MaybeDrag ghost={ghost} layout={layout} elevation={elevation} key={d.id} id={id} height={y}>
-                <Duct duct={d} y={y} color={colorFor(isTrunk ? 'trunk' : d.id, d.side === 'supply' ? COLORS.accent : COLORS.return)} highlight={warned.has(d.id)} />
+                <Duct duct={d} y={y} color={colorFor(isTrunk ? 'trunk' : d.id, d.side === 'supply' ? COLORS.supply : COLORS.return)} highlight={warned.has(d.id)} />
               </MaybeDrag>
             );
           })}
@@ -208,7 +234,7 @@ function FloorContent({ project, result, elevation, ghost, selectedId, wallMode,
             const ceil = room?.ceilingHeight ?? 8;
             const branch = branchOf.get(r.id);
             const top = branch ? ductHeight(branch) : maxCeiling + framingDepthFt;
-            const color = colorFor(r.id, r.kind === 'supply' ? COLORS.accent : COLORS.return);
+            const color = colorFor(r.id, r.kind === 'supply' ? COLORS.supply : COLORS.return);
             const size = r.kind === 'supply' ? [1.2, 0.12, 0.8] : [1.8, 0.12, 1.4];
             return (
               <MaybeDrag ghost={ghost} layout={layout} elevation={elevation} key={r.id} id={r.id} height={ceil}>
@@ -346,6 +372,22 @@ function joistSpans(c: number, poly: Pt[], dir: 'x' | 'y'): [number, number][] {
   const out: [number, number][] = [];
   for (let i = 0; i + 1 < hits.length; i += 2) out.push([hits[i], hits[i + 1]]);
   return out;
+}
+
+/** A marked equipment area, shown as a green patch on the floor. */
+function EquipmentPatch({ polygon }: { polygon: Pt[] }) {
+  const shape = useMemo(() => {
+    const s = new THREE.Shape();
+    polygon.forEach((p, i) => (i === 0 ? s.moveTo(p.x, -p.y) : s.lineTo(p.x, -p.y)));
+    s.closePath();
+    return s;
+  }, [polygon]);
+  return (
+    <mesh rotation-x={-Math.PI / 2} position-y={0.04} raycast={() => null}>
+      <shapeGeometry args={[shape]} />
+      <meshBasicMaterial color="#10b981" transparent opacity={0.25} side={THREE.DoubleSide} />
+    </mesh>
+  );
 }
 
 /** Ceiling joists above the rooms: the floor cavity ducts run inside, or the attic ceiling they lie on. */

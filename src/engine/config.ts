@@ -64,6 +64,21 @@ export interface EngineConfig {
     airHandlerClearanceFt: number;
   };
   scoring: { lengthWeight: number; fittingWeight: number; imbalanceWeight: number; roomCrossingPenaltyFt: number };
+  pathfinding: {
+    /** Grid cell size (ft); grown automatically on large buildings to stay under maxCells. */
+    cellFt: number;
+    maxCells: number;
+    /** Cost of an elbow, in feet of straight duct. */
+    turnCostFt: number;
+    /** Cost of passing through a wall above the ceiling. */
+    wallCrossCostFt: number;
+    /** Cost of dropping under a secondary beam (two offsets). */
+    secondaryBeamCostFt: number;
+    /** Cost of crossing a main beam: effectively forbidden, used only when no other path exists. */
+    mainBeamCostFt: number;
+    /** Clearance kept below a beam when a duct drops under it (in). */
+    beamClearanceIn: number;
+  };
 }
 
 export const defaultConfig = raw as unknown as EngineConfig;

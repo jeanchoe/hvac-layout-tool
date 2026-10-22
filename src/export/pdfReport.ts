@@ -11,7 +11,9 @@ const C = {
   muted: [107, 114, 128] as RGB,
   line: [229, 231, 235] as RGB,
   accent: [37, 99, 235] as RGB,
-  ret: [100, 116, 139] as RGB,
+  // Drafting colours: supply dark blue, return pink.
+  supply: [30, 64, 175] as RGB,
+  ret: [219, 39, 119] as RGB,
   danger: [220, 38, 38] as RGB,
   amberBg: [255, 251, 235] as RGB,
   amber: [146, 64, 14] as RGB,
@@ -105,10 +107,36 @@ export function buildReport(project: Project, results: Record<string, EngineResu
       }
     }
 
+    // Equipment areas and beams on this floor.
+    for (const a of (project.equipmentAreas ?? []).filter((x) => x.floorId === floor.id)) {
+      color('fill', [209, 250, 229]);
+      color('draw', [5, 150, 105]);
+      doc.setLineWidth(0.6);
+      doc.setLineDashPattern([2, 1.5], 0);
+      polygon(a.polygon.map(P), 'FD');
+      doc.setLineDashPattern([], 0);
+      const c = P(centroid(a.polygon));
+      font(6, 'bold', [4, 120, 87]);
+      doc.text(a.name, c.x, c.y + 10, { align: 'center' });
+    }
+    (project.beams ?? [])
+      .filter((x) => x.floorId === floor.id)
+      .forEach((bm, i) => {
+        const a = P(bm.a);
+        const c = P(bm.b);
+        color('draw', bm.kind === 'main' ? [127, 29, 29] : [87, 83, 78]);
+        doc.setLineWidth(bm.kind === 'main' ? 2.2 : 1.2);
+        doc.setLineDashPattern(bm.kind === 'main' ? [] : [4, 2], 0);
+        doc.line(a.x, a.y, c.x, c.y);
+        doc.setLineDashPattern([], 0);
+        font(6, 'bold', bm.kind === 'main' ? [127, 29, 29] : [68, 64, 60]);
+        doc.text(`B-${i + 1}`, (a.x + c.x) / 2 + 3, (a.y + c.y) / 2 - 3);
+      });
+
     if (layout) {
       const warned = new Set(result.warnings.flatMap((w) => w.componentIds));
       for (const d of [...result.ducts].sort((p, q) => (p.side === 'return' ? -1 : 1) - (q.side === 'return' ? -1 : 1))) {
-        color('draw', warned.has(d.id) ? C.danger : d.side === 'supply' ? C.accent : C.ret);
+        color('draw', warned.has(d.id) ? C.danger : d.side === 'supply' ? C.supply : C.ret);
         doc.setLineWidth(Math.max(0.8, (d.diameter / 12) * s * 0.8));
         doc.setLineDashPattern(d.side === 'return' ? [3, 2] : [], 0);
         const a = P(d.start);
@@ -119,7 +147,7 @@ export function buildReport(project: Project, results: Record<string, EngineResu
       for (const r of layout.registers) {
         const p = P(r.position);
         const z = (r.kind === 'supply' ? 1.4 : 1.8) * s;
-        const c = warned.has(r.id) ? C.danger : r.kind === 'supply' ? C.accent : C.ret;
+        const c = warned.has(r.id) ? C.danger : r.kind === 'supply' ? C.supply : C.ret;
         color('draw', c);
         color('fill', r.kind === 'supply' ? c : [255, 255, 255]);
         doc.setLineWidth(0.8);
@@ -201,7 +229,7 @@ export function buildReport(project: Project, results: Record<string, EngineResu
   kv('Heating load (est.)', `${fmtInt(result.totals.heatingBtuh)} BTU/h`);
   kv('Recommended size', `${result.recommended.tons} ton`);
   const fr = result.framing;
-  kv('Ducts run', fr.ductSpace === 'attic' ? 'In attic' : `Between ${fr.depthIn}" joists, ${fr.spacingIn}" o.c.`);
+  kv('Ducts run', fr.ductSpace === 'attic' ? 'In attic' : fr.ductSpace === 'plenum' ? `Ceiling plenum, ${fr.plenumDepthIn}" deep` : `Between ${fr.depthIn}" joists, ${fr.spacingIn}" o.c.`);
   if (layout) {
     y += 8;
     sectionTitle('Distribution');
@@ -232,13 +260,18 @@ export function buildReport(project: Project, results: Record<string, EngineResu
     doc.text(label, col + 26, y);
     y += 13;
   };
-  legend(C.accent, 'Supply duct (width ~ size)', 'line');
+  legend(C.supply, 'Supply duct (width ~ size)', 'line');
   legend(C.ret, 'Return duct', 'dash');
-  legend(C.accent, 'Supply register', 'box');
+  legend(C.supply, 'Supply register', 'box');
   legend(C.ret, 'Return grille', 'grille');
   legend(C.ink, 'Air handler (AHU)', 'ahu');
   legend(C.danger, 'Has a warning', 'line');
   legend(C.window, 'Window', 'line');
+  if ((project.beams ?? []).some((x) => x.floorId === floor.id)) {
+    legend([127, 29, 29], 'Main beam (not crossed)', 'line');
+    legend([87, 83, 78], 'Secondary beam', 'dash');
+  }
+  if ((project.equipmentAreas ?? []).some((x) => x.floorId === floor.id)) legend([5, 150, 105], 'Equipment area', 'box');
   });
 
   // Building-wide figures for the tables that follow.

@@ -1,4 +1,4 @@
-import type { AirHandler, Framing, Layout, Pt, Register, Room, Trunk, Wall, Warning } from '../types';
+import type { AirHandler, Beam, EquipmentArea, Framing, Layout, Pt, Register, Room, Trunk, Wall, Warning } from '../types';
 import type { EngineConfig } from './config';
 import { add, bbox, centroid, closestPointOnSegment, dist, distToPolygonEdge, edges, lerp, outwardNormal, pointInPolygon, scale, sub } from './geometry';
 import { RETURN_TRUNK_GAP_FT, acrossJoists, bayCentre, joistGrid, snapToBay, trunkAxisFor, type JoistGrid } from './framing';
@@ -234,6 +234,41 @@ function airHandlerCandidates(rooms: Room[]): Pt[] {
   return out;
 }
 
+/** Where the load is: room centres weighted by cooling load. Units go near it to keep runs short. */
+export function loadCentroid(rooms: Room[], loads: RoomLoad[]): Pt {
+  let w = 0;
+  let x = 0;
+  let y = 0;
+  for (const r of rooms) {
+    const l = loads.find((q) => q.roomId === r.id)?.coolingBtuh ?? 0;
+    const c = centroid(r.polygon);
+    w += l;
+    x += c.x * l;
+    y += c.y * l;
+  }
+  if (w > 0) return { x: x / w, y: y / w };
+  const b = bbox(rooms.flatMap((r) => r.polygon));
+  return { x: b.minX + b.width / 2, y: b.minY + b.height / 2 };
+}
+
+/** Spots inside the marked equipment areas, nearest the load first. */
+export function equipmentAreaSpots(areas: EquipmentArea[], near: Pt, limit = 12): Pt[] {
+  const out: Pt[] = [];
+  for (const a of areas) {
+    const b = bbox(a.polygon);
+    const spots: Pt[] = [];
+    for (let y = b.minY + 1.5; y <= b.maxY - 1.5; y += 2) {
+      for (let x = b.minX + 1.5; x <= b.maxX - 1.5; x += 2) {
+        const p = { x, y };
+        if (pointInPolygon(p, a.polygon) && distToPolygonEdge(p, a.polygon) >= 1.25) spots.push(p);
+      }
+    }
+    // A small closet may have no spot that clear: use its centre.
+    out.push(...(spots.length ? spots : [centroid(a.polygon)]));
+  }
+  return out.sort((p, q) => dist(p, near) - dist(q, near)).slice(0, limit);
+}
+
 export interface GenerateInput {
   rooms: Room[];
   walls: Wall[];
@@ -244,32 +279,45 @@ export interface GenerateInput {
   airHandlerPosition?: Pt;
   framing: Framing;
   roomsSignature: string;
+  beams?: Beam[];
+  /** Where the unit may go; none = anywhere near the plan centre. */
+  equipmentAreas?: EquipmentArea[];
 }
 
 /** Builds a starting layout: tries nearby variations and keeps the best score. */
 export function generateLayout(input: GenerateInput): { layout: Layout; score: LayoutScore } {
-  const { rooms, walls, loads, tons, config, framing } = input;
+  const { rooms, walls, loads, tons, config, framing, beams = [], equipmentAreas = [] } = input;
+  const plenum = framing.ductSpace === 'plenum';
   const grid = joistGrid(rooms, framing, config);
   const equipment = equipmentForTons(tons, config);
   const supply = placeSupplyRegisters(rooms, walls, loads, equipment.airflowCfm, config, grid);
   const b = bbox(rooms.flatMap((r) => r.polygon));
   const longAxis: Trunk['axis'] = b.width >= b.height ? 'x' : 'y';
   // In joist bays the trunk has to cross the joists; in an attic it follows the building's long axis.
-  const axes: Trunk['axis'][] = grid ? [trunkAxisFor(framing)] : Math.max(b.width, b.height) / Math.max(1, Math.min(b.width, b.height)) < 1.3 ? ['x', 'y'] : [longAxis];
-  const ahuSpots = input.airHandlerPosition ? [input.airHandlerPosition] : airHandlerCandidates(rooms);
+  // A plenum network is found by pathfinding, so the trunk line plays no part there.
+  const axes: Trunk['axis'][] = plenum || !grid ? (plenum || Math.max(b.width, b.height) / Math.max(1, Math.min(b.width, b.height)) >= 1.3 ? [longAxis] : ['x', 'y']) : [trunkAxisFor(framing)];
+  const centre = loadCentroid(rooms, loads);
+  const ahuSpots = input.airHandlerPosition
+    ? [input.airHandlerPosition]
+    : equipmentAreas.length
+      ? equipmentAreaSpots(equipmentAreas, centre)
+      : plenum
+        ? airHandlerCandidates(rooms).sort((p, q) => dist(p, centre) - dist(q, centre)).slice(0, 12)
+        : airHandlerCandidates(rooms);
+  const shifts = plenum ? [0] : [0, -3, 3];
 
   let best: { layout: Layout; score: LayoutScore } | null = null;
   for (const pos of ahuSpots) {
     const atticReturns = grid ? null : placeReturns(rooms, pos, supply, equipment.airflowCfm, config);
     for (const axis of axes) {
-      for (const shift of [0, -3, 3]) {
+      for (const shift of shifts) {
         const airHandler: AirHandler = { id: 'ahu', position: pos, ...equipment };
         const trunk: Trunk = { axis, offset: (axis === 'x' ? pos.y : pos.x) + shift };
         // Between joists the central return depends on where the trunk soffit is.
         const returns = atticReturns ?? placeReturns(rooms, pos, supply, equipment.airflowCfm, config, grid, trunk);
         const layout: Layout = { airHandler, trunk, registers: [...supply, ...returns], roomsSignature: input.roomsSignature };
-        const route = routeDucts(rooms, layout, config, framing);
-        const warnings = validate({ rooms, walls, loads, layout, route, config });
+        const route = routeDucts(rooms, layout, config, framing, beams);
+        const warnings = validate({ rooms, walls, loads, layout, route, config, beams, equipmentAreas });
         const score = scoreLayout(rooms, loads, layout, route, warnings, config);
         if (!best || score.total < best.score.total) best = { layout, score };
       }

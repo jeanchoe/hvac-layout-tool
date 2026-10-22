@@ -213,7 +213,8 @@
     "joistDirection": "y",
     "spacingIn": 24,
     "depthIn": 9.25,
-    "soffitDepthIn": 14
+    "soffitDepthIn": 14,
+    "plenumDepthIn": 30
   },
   "framing": {
     "joistThicknessIn": 1.5,
@@ -235,5 +236,15 @@
     "fittingWeight": 4,
     "imbalanceWeight": 2,
     "roomCrossingPenaltyFt": 12
+  },
+  "pathfinding": {
+    "_note": "Grid search for ceiling-plenum routing. Costs are in feet of duct-equivalent.",
+    "cellFt": 1,
+    "maxCells": 9000,
+    "turnCostFt": 3,
+    "wallCrossCostFt": 1,
+    "secondaryBeamCostFt": 8,
+    "mainBeamCostFt": 1000,
+    "beamClearanceIn": 1
   }
 }

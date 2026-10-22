@@ -1,8 +1,9 @@
-import type { DuctSegment, Framing, Layout, Pt, Register, Room, Trunk } from '../types';
+import type { Beam, DuctSegment, Framing, Layout, Pt, Register, Room, Trunk } from '../types';
 import { defaultConfig, resolveFraming, type EngineConfig } from './config';
 import { bbox, dist, pointInPolygon } from './geometry';
 import { branchEfficiency, fitDuct, sizeDuct } from './ductSizing';
 import { RETURN_TRUNK_GAP_FT, SOFFIT_CONNECTION_FT, joistGrid, type JoistGrid } from './framing';
+import { routeTree, type BeamCrossing, type Terminal } from './pathfind';
 
 export interface RouteResult {
   ducts: DuctSegment[];
@@ -15,6 +16,8 @@ export interface RouteResult {
   roomCrossings: number;
   /** Joist layout when ducts run in joist bays, else null. */
   grid: JoistGrid | null;
+  /** Where ducts cross beams (ceiling-plenum routing only). */
+  beamCrossings: (BeamCrossing & { ductId: string })[];
 }
 
 /** Usable extent of the trunk along its axis: the building's bounding box, inset 1 ft. */
@@ -125,8 +128,9 @@ function reducingRun(prefix: string, side: DuctSegment['side'], stops: { t: numb
  * Joist bays: the trunk (and a parallel return trunk) cross the joists in a soffit, and every
  * branch runs along the joists inside its bay.
  */
-export function routeDucts(rooms: Room[], layout: Layout, config: EngineConfig = defaultConfig, framingIn?: Framing): RouteResult {
+export function routeDucts(rooms: Room[], layout: Layout, config: EngineConfig = defaultConfig, framingIn?: Framing, beams: Beam[] = []): RouteResult {
   const framing = resolveFraming(framingIn, config);
+  if (framing.ductSpace === 'plenum') return routePlenum(rooms, layout, beams, framing, config);
   const grid = joistGrid(rooms, framing, config);
   const { airHandler, trunk, registers } = layout;
   const ducts: DuctSegment[] = [];
@@ -134,7 +138,7 @@ export function routeDucts(rooms: Room[], layout: Layout, config: EngineConfig =
   const efficiency: Record<string, number> = {};
   let fittings = 0;
   let roomCrossings = 0;
-  if (rooms.length === 0) return { ducts, branchLength, efficiency, totalLength: 0, fittings, roomCrossings, grid };
+  if (rooms.length === 0) return { ducts, branchLength, efficiency, totalLength: 0, fittings, roomCrossings, grid, beamCrossings: [] };
 
   const soffit: SpaceLimit = grid ? { maxHeightIn: framing.soffitDepthIn } : {};
   const bay: SpaceLimit = grid ? { maxHeightIn: grid.bayHeightIn, maxWidthIn: grid.clearWidthIn } : {};
@@ -202,5 +206,52 @@ export function routeDucts(rooms: Room[], layout: Layout, config: EngineConfig =
   }
 
   const totalLength = ducts.reduce((s, d) => s + d.length, 0);
-  return { ducts, branchLength, efficiency, totalLength, fittings, roomCrossings, grid };
+  return { ducts, branchLength, efficiency, totalLength, fittings, roomCrossings, grid, beamCrossings: [] };
+}
+
+/**
+ * Ceiling plenum: the supply and return networks are each found by pathfinding from the unit to
+ * every register or grille, around the beams. A run that drops under a secondary beam must fit
+ * the space below it; everything else must fit the plenum.
+ */
+function routePlenum(rooms: Room[], layout: Layout, beams: Beam[], framing: Framing, config: EngineConfig): RouteResult {
+  const ducts: DuctSegment[] = [];
+  const branchLength: Record<string, number> = {};
+  const efficiency: Record<string, number> = {};
+  const beamCrossings: RouteResult['beamCrossings'] = [];
+  const clearance = config.pathfinding.beamClearanceIn;
+  const beamDepth = new Map(beams.map((b) => [b.id, b.depthIn]));
+  let fittings = 0;
+  let wallCrossings = 0;
+
+  for (const side of ['supply', 'return'] as const) {
+    const regs = layout.registers.filter((r) => r.kind === side);
+    const terminals: Terminal[] = regs.map((r) => ({ id: r.id, at: r.position, cfm: r.targetCfm }));
+    const tree = routeTree(rooms, beams, layout.airHandler.position, terminals, config);
+    fittings += tree.turns + tree.tees + regs.length;
+    wallCrossings += tree.wallCrossings;
+    let mainNo = 0;
+    const branchNo = new Map<string, number>();
+    for (const t of tree.segments) {
+      const under = t.crossings.filter((c) => c.kind === 'secondary').map((c) => framing.plenumDepthIn - (beamDepth.get(c.beamId) ?? 0) - clearance);
+      const limit = { maxHeightIn: Math.min(framing.plenumDepthIn - clearance, ...under) };
+      const branch = t.terminalCount === 1 && t.terminalId !== null;
+      let id: string;
+      if (branch) {
+        const k = branchNo.get(t.terminalId!) ?? 0;
+        branchNo.set(t.terminalId!, k + 1);
+        id = `${side === 'supply' ? 'branch' : 'return'}-${t.terminalId}${k ? `-${k}` : ''}`;
+      } else id = `${side === 'supply' ? 'main' : 'rmain'}-${mainNo++}`;
+      const d = seg(id, t.start, t.end, branch ? 'branch' : 'trunk', side, t.cfm, config, limit, branch ? t.terminalId! : undefined);
+      ducts.push(d);
+      for (const c of t.crossings) beamCrossings.push({ ...c, ductId: id });
+      if (branch) branchLength[t.terminalId!] = (branchLength[t.terminalId!] ?? 0) + d.length;
+    }
+    for (const r of regs) {
+      branchLength[r.id] ??= 0;
+      efficiency[r.id] = side === 'supply' ? branchEfficiency(branchLength[r.id], config) : 1;
+    }
+  }
+  const totalLength = ducts.reduce((s, d) => s + d.length, 0);
+  return { ducts, branchLength, efficiency, totalLength, fittings, roomCrossings: wallCrossings, grid: null, beamCrossings };
 }

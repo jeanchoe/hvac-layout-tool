@@ -5,7 +5,8 @@ import { draggableKind, moveComponent } from '../state/layoutActions';
 import { useStore } from '../state/store';
 import type { Project, Pt, Wall } from '../types';
 
-export const COLORS = { accent: '#2563eb', return: '#64748b', danger: '#dc2626', wall: '#1f2937', select: '#f59e0b' };
+/** Air systems use the usual drafting colours: supply dark blue, return pink. */
+export const COLORS = { accent: '#2563eb', supply: '#1e40af', return: '#db2777', danger: '#dc2626', wall: '#1f2937', select: '#f59e0b' };
 
 interface Props {
   project: Project;
@@ -134,6 +135,30 @@ export function PlanView({ project, result, selectedId, onSelect, showLayout, ed
         }),
       )}
 
+      {(project.equipmentAreas ?? [])
+        .filter((a) => a.floorId === result.floorId)
+        .map((a) => {
+          const c = centroid(a.polygon);
+          return (
+            <g key={a.id} style={{ pointerEvents: 'none' }}>
+              <polygon points={a.polygon.map((p) => `${p.x},${p.y}`).join(' ')} fill="rgb(16 185 129 / 0.14)" stroke="#059669" strokeWidth={0.15} strokeDasharray="0.6 0.4" />
+              <text x={c.x} y={c.y + (showLayout ? 2 : 0)} textAnchor="middle" fontSize={0.7} fontWeight={600} fill="#047857">
+                {a.name}
+              </text>
+            </g>
+          );
+        })}
+      {(project.beams ?? [])
+        .filter((bm) => bm.floorId === result.floorId)
+        .map((bm, i) => (
+          <g key={bm.id} style={{ pointerEvents: 'none' }}>
+            <line x1={bm.a.x} y1={bm.a.y} x2={bm.b.x} y2={bm.b.y} stroke={bm.kind === 'main' ? '#7f1d1d' : '#57534e'} strokeWidth={bm.kind === 'main' ? 0.45 : 0.25} strokeDasharray={bm.kind === 'main' ? undefined : '0.8 0.4'} strokeOpacity={0.85} />
+            <text x={(bm.a.x + bm.b.x) / 2 + 0.4} y={(bm.a.y + bm.b.y) / 2 - 0.4} fontSize={0.7} fontWeight={700} fill={bm.kind === 'main' ? '#7f1d1d' : '#44403c'}>
+              B-{i + 1}
+            </text>
+          </g>
+        ))}
+
       {showLayout && result.grid && (
         <g clipPath="url(#plan-rooms)" style={{ pointerEvents: 'none' }}>
           <clipPath id="plan-rooms">
@@ -155,7 +180,7 @@ export function PlanView({ project, result, selectedId, onSelect, showLayout, ed
         <g>
           {result.ducts.map((d) => {
             const isTrunk = d.type === 'trunk' && d.side === 'supply';
-            const base = d.side === 'supply' ? COLORS.accent : COLORS.return;
+            const base = d.side === 'supply' ? COLORS.supply : COLORS.return;
             const id = isTrunk ? 'trunk' : d.id;
             return (
               <line
@@ -176,7 +201,7 @@ export function PlanView({ project, result, selectedId, onSelect, showLayout, ed
           })}
           {layout.registers.map((r) => {
             const s = r.kind === 'supply' ? 1.4 : 1.8;
-            const base = r.kind === 'supply' ? COLORS.accent : COLORS.return;
+            const base = r.kind === 'supply' ? COLORS.supply : COLORS.return;
             return (
               <g key={r.id} onPointerDown={startDrag(r.id)} style={{ cursor: editable ? 'move' : 'pointer' }}>
                 <rect x={r.position.x - s / 2} y={r.position.y - s / 2} width={s} height={s} rx={0.1} fill={r.kind === 'supply' ? color(r.id, base) : '#fff'} stroke={sel(r.id) ? COLORS.select : color(r.id, base)} strokeWidth={sel(r.id) ? 0.35 : 0.2} />
