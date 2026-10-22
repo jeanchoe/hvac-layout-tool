@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react';
-import { branchEfficiency, defaultConfig, type EngineResult } from '../../engine';
+import { autoUnitCount, branchEfficiency, defaultConfig, systemOf, type EngineResult } from '../../engine';
 import { centroid } from '../../engine/geometry';
 import { ductSize, fmtBtuh, fmtCfm, fmtFt, fmtInt, fmtSqFt } from '../../lib/format';
 import { engineResults, lastEvalMs, useEngine } from '../../state/engine';
-import { addRegister, deleteRegister, draggableKind, generateMissingLayouts, rebalance, regenerateLayout, setAirHandlerTons, setFraming, setRegisterCfm, splitRegister } from '../../state/layoutActions';
+import { addRegister, assignRoomToSystem, deleteRegister, draggableKind, generateMissingLayouts, rebalance, regenerateLayout, renameSystem, rezone, setAirHandlerTons, setCustomUnit, setFraming, setRegisterCfm, setUnitCount, splitRegister, trunkId } from '../../state/layoutActions';
 import { currentFloor, useStore } from '../../state/store';
 import { FloorTabs } from '../FloorTabs';
-import type { Framing, Project } from '../../types';
-import { COLORS, PlanView } from '../PlanView';
+import type { Framing, Layout, Project } from '../../types';
+import { COLORS, PlanView, zoneColor } from '../PlanView';
 import { Scene3D, type ViewRequest, type WallMode } from '../Scene3D';
 import { Button, EstimateBadge, NumberInput, Stat } from '../ui';
 
@@ -18,7 +18,7 @@ export function LayoutStep() {
   const setStep = useStore((s) => s.setStep);
   const result = useEngine();
   const floor = useStore((s) => currentFloor(s));
-  const layout = project.layouts[floor.id];
+  const systems = project.layouts[floor.id];
   const multiFloor = project.floors.length > 1;
   const [floorView, setFloorView] = useState<'this' | 'all'>('this');
   const [mode, setMode] = useState<'3d' | 'plan'>('3d');
@@ -43,7 +43,7 @@ export function LayoutStep() {
     return () => window.removeEventListener('keydown', onKey);
   }, [select]);
 
-  if (!layout) {
+  if (!systems?.length) {
     const hasRooms = project.rooms.some((r) => r.floorId === floor.id);
     return (
       <div className="flex h-full flex-col">
@@ -62,7 +62,7 @@ export function LayoutStep() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-    <FloorTabs note={multiFloor ? `Each floor has its own system. Editing ${floor.name}.` : undefined} />
+    <FloorTabs note={multiFloor ? `Each floor has its own units and zones. Editing ${floor.name}.` : undefined} />
     <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
       <div className="relative min-h-[65vh] min-w-0 flex-1">
         {mode === '3d' ? (
@@ -134,7 +134,7 @@ export function LayoutStep() {
 
         <div className="pointer-events-none absolute bottom-3 left-3 flex flex-col items-start gap-2">
           <div className="rounded-md bg-white/90 px-3 py-1.5 text-xs text-gray-500 shadow-sm ring-1 ring-gray-200">
-            {mode === '3d' ? 'Left-drag to orbit · right-drag to pan · scroll to zoom · ' : ''}Click to inspect · drag registers, the AHU or the trunk to move them
+            {mode === '3d' ? 'Left-drag to orbit · right-drag to pan · scroll to zoom · ' : ''}Click to inspect · drag registers, units or trunks to move them
           </div>
           <EstimateBadge />
         </div>
@@ -196,19 +196,19 @@ function Section({ title, children, actions }: { title: string; children: React.
 }
 
 function Properties({ project, result, selectedId }: { project: Project; result: EngineResult; selectedId: string | null }) {
-  const layout = project.layouts[result.floorId];
+  const systems = project.layouts[result.floorId] ?? [];
   const select = useStore((s) => s.select);
-  const ahu = layout.airHandler;
-  const supplyTotal = layout.registers.filter((r) => r.kind === 'supply').reduce((s, r) => s + r.targetCfm, 0);
-  const returnTotal = layout.registers.filter((r) => r.kind === 'return').reduce((s, r) => s + r.targetCfm, 0);
+  const multi = systems.length > 1;
+  const registers = systems.flatMap((s) => s.registers);
   const roomName = (id: string) => project.rooms.find((r) => r.id === id)?.name ?? '—';
 
   const room = result.rooms.find((r) => r.id === selectedId);
   if (room) {
     const load = result.loads.find((l) => l.roomId === room.id)!;
     const air = result.airflow[room.id];
-    const regs = layout.registers.filter((r) => r.roomId === room.id);
+    const regs = registers.filter((r) => r.roomId === room.id);
     const c = centroid(room.polygon);
+    const servedBy = result.systems.find((s) => s.roomIds.includes(room.id));
     return (
       <Section title="Room" actions={<CloseBtn />}>
         <div className="mb-2 text-base font-semibold">{room.name}</div>
@@ -217,6 +217,18 @@ function Properties({ project, result, selectedId }: { project: Project; result:
         <Row label="Heating load">{fmtBtuh(load.heatingBtuh)}</Row>
         <Row label="Airflow needed">{fmtCfm(air?.required ?? 0)}</Row>
         <Row label="Airflow delivered">{fmtCfm(air?.delivered ?? 0)}</Row>
+        {multi && (
+          <div className="flex items-center justify-between gap-3 py-1 text-sm">
+            <span className="text-gray-500">Served by</span>
+            <select className="rounded-md border border-gray-300 px-2 py-1 text-sm" value={servedBy?.id ?? ''} onChange={(e) => assignRoomToSystem(room.id, e.target.value)}>
+              {systems.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         <div className="mt-3 space-y-1">
           {regs.map((r) => (
             <button key={r.id} onClick={() => select(r.id)} className="flex w-full justify-between rounded px-2 py-1 text-left text-sm hover:bg-gray-50">
@@ -237,12 +249,13 @@ function Properties({ project, result, selectedId }: { project: Project; result:
     );
   }
 
-  const reg = layout.registers.find((r) => r.id === selectedId);
+  const reg = registers.find((r) => r.id === selectedId);
   if (reg) {
     const duct = result.ducts.find((d) => d.registerId === reg.id);
     return (
       <Section title={reg.kind === 'supply' ? 'Supply register' : 'Return grille'} actions={<CloseBtn />}>
         <Row label="Room">{roomName(reg.roomId)}</Row>
+        {multi && <Row label="Unit">{systemOf(systems, reg.id)?.name}</Row>}
         <div className="flex items-center justify-between gap-3 py-1 text-sm">
           <span className="text-gray-500">Design airflow</span>
           <NumberInput className="w-32" value={reg.targetCfm} min={0} max={2000} step={5} suffix="CFM" onChange={(v) => setRegisterCfm(reg.id, v)} />
@@ -265,41 +278,15 @@ function Properties({ project, result, selectedId }: { project: Project; result:
     );
   }
 
-  if (selectedId === 'ahu') {
-    return (
-      <Section title="Air handler" actions={<CloseBtn />}>
-        <div className="flex items-center justify-between gap-3 py-1 text-sm">
-          <span className="text-gray-500">Size</span>
-          <select className="rounded-md border border-gray-300 px-2 py-1 text-sm" value={ahu.tons} onChange={(e) => setAirHandlerTons(Number(e.target.value))}>
-            {defaultConfig.nominalTons.map((t) => (
-              <option key={t} value={t}>
-                {t} ton{t === result.recommended.tons ? ' (recommended)' : ''}
-              </option>
-            ))}
-          </select>
-        </div>
-        <Row label="Capacity">{fmtBtuh(ahu.capacityBtuh)}</Row>
-        <Row label="Airflow">{fmtCfm(ahu.airflowCfm)}</Row>
-        <Row label="Supply registers total">{fmtCfm(supplyTotal)}</Row>
-        <Row label="Returns total">{fmtCfm(returnTotal)}</Row>
-        <Row label="Position">
-          {ahu.position.x.toFixed(1)}, {ahu.position.y.toFixed(1)} ft
-        </Row>
-        <Button className="mt-3 w-full text-xs" onClick={rebalance}>
-          Rebalance registers to {fmtCfm(ahu.airflowCfm)}
-        </Button>
-        <Button variant="ghost" className="mt-1 w-full text-xs" onClick={() => regenerateLayout(true)}>
-          Re-route everything from this spot
-        </Button>
-      </Section>
-    );
-  }
+  const unitSys = selectedId?.startsWith('ahu:') ? systemOf(systems, selectedId) : undefined;
+  if (unitSys) return <UnitPanel project={project} result={result} sys={unitSys} />;
 
-  if (selectedId?.startsWith('trunk')) {
-    const segs = result.ducts.filter((d) => d.type === 'trunk' && d.side === 'supply');
+  const trunkSys = selectedId?.endsWith('/trunk') ? systemOf(systems, selectedId) : undefined;
+  if (trunkSys) {
+    const segs = result.ducts.filter((d) => d.type === 'trunk' && d.side === 'supply' && d.id.startsWith(`${trunkSys.id}/`));
     return (
-      <Section title="Supply trunk" actions={<CloseBtn />}>
-        <Row label="Runs">{layout.trunk.axis === 'x' ? 'East–west' : 'North–south'}</Row>
+      <Section title={multi ? `Supply trunk · ${trunkSys.name}` : 'Supply trunk'} actions={<CloseBtn />}>
+        {result.framing.ductSpace !== 'plenum' && <Row label="Runs">{trunkSys.trunk.axis === 'x' ? 'East–west' : 'North–south'}</Row>}
         <Row label="Total length">{fmtFt(segs.reduce((s, d) => s + d.length, 0))}</Row>
         <table className="mt-2 w-full text-xs">
           <thead className="text-left text-gray-500">
@@ -313,7 +300,7 @@ function Properties({ project, result, selectedId }: { project: Project; result:
           <tbody className="tabular-nums">
             {segs.map((d, i) => (
               <tr key={d.id} className="border-t border-gray-100">
-                <td className="py-1">{d.id === 'trunk-stub' ? 'Plenum drop' : `#${i + 1}`}</td>
+                <td className="py-1">{d.id.endsWith('/trunk-stub') ? 'Plenum drop' : `#${i + 1}`}</td>
                 <td className="text-right">{fmtInt(d.cfm)}</td>
                 <td className="text-right">{d.shape === 'rect' ? `${d.widthIn}×${d.heightIn}"` : `${d.diameter}"`}</td>
                 <td className="text-right">{d.length.toFixed(1)} ft</td>
@@ -321,7 +308,7 @@ function Properties({ project, result, selectedId }: { project: Project; result:
             ))}
           </tbody>
         </table>
-        <p className="mt-2 text-xs text-gray-500">Drag the trunk to move it; branches re-route automatically.</p>
+        <p className="mt-2 text-xs text-gray-500">{result.framing.ductSpace === 'plenum' ? 'Mains are routed around the beams automatically; move the unit or registers to change them.' : 'Drag the trunk to move it; branches re-route automatically.'}</p>
       </Section>
     );
   }
@@ -345,26 +332,150 @@ function Properties({ project, result, selectedId }: { project: Project; result:
     );
   }
 
+  const floor = project.floors.find((f) => f.id === result.floorId);
+  const auto = autoUnitCount(result.totals.coolingBtuh);
+  const tons = systems.reduce((t, s) => t + s.airHandler.tons, 0);
+  const supplyCount = registers.filter((r) => r.kind === 'supply').length;
   return (
     <Section title="Layout summary">
       <div className="grid grid-cols-2 gap-3">
-        <Stat label="System" value={`${ahu.tons} ton`} sub={fmtCfm(ahu.airflowCfm)} />
+        <Stat label={multi ? `${systems.length} units` : 'System'} value={`${+tons.toFixed(1)} ton`} sub={fmtCfm(systems.reduce((t, s) => t + s.airHandler.airflowCfm, 0))} />
         <Stat label="Cooling load" value={fmtBtuh(result.totals.coolingBtuh)} sub={`Heating ${fmtBtuh(result.totals.heatingBtuh)}`} />
         <Stat label="Duct length" value={fmtFt(result.score?.ductLength ?? 0)} sub={`${result.score?.fittings ?? 0} fittings`} />
-        <Stat label="Registers" value={`${layout.registers.filter((r) => r.kind === 'supply').length} supply`} sub={`${layout.registers.filter((r) => r.kind === 'return').length} return`} />
+        <Stat label="Registers" value={`${supplyCount} supply`} sub={`${registers.length - supplyCount} return`} />
       </div>
       <p className="mt-3 text-xs text-gray-500">
         {fmtSqFt(result.totals.areaSqFt)} · climate zone {result.climate.zone}. Click any component to inspect it.
       </p>
+
+      <div className="mt-4 flex items-center justify-between gap-3 text-sm">
+        <span className="text-gray-500">Units on this floor</span>
+        <select
+          aria-label="Units on this floor"
+          className="rounded-md border border-gray-300 px-2 py-1 text-sm"
+          value={floor?.unitCount ?? 'auto'}
+          onChange={(e) => setUnitCount(e.target.value === 'auto' ? undefined : Number(e.target.value))}
+        >
+          <option value="auto">Automatic ({auto})</option>
+          {[1, 2, 3, 4, 5, 6].map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </select>
+      </div>
+      <ul className="mt-2 space-y-1">
+        {result.systems.map((s) => {
+          const sys = systems.find((x) => x.id === s.id)!;
+          const under = sys.airHandler.capacityBtuh < s.totals.coolingBtuh;
+          return (
+            <li key={s.id}>
+              <button onClick={() => select(sys.airHandler.id)} className="flex w-full items-center justify-between gap-2 rounded-md border border-gray-200 px-2.5 py-1.5 text-left text-sm hover:bg-gray-50">
+                <span className="flex items-center gap-2">
+                  <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: zoneColor(result.systems.indexOf(s)) }} />
+                  <span className="font-medium">{s.name}</span>
+                  <span className="text-xs text-gray-500">
+                    {s.roomIds.length} room{s.roomIds.length === 1 ? '' : 's'}
+                  </span>
+                </span>
+                <span className={`tabular-nums text-xs ${under ? 'text-danger' : 'text-gray-600'}`}>
+                  {sys.airHandler.tons} ton · {fmtBtuh(s.totals.coolingBtuh)}
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+
       <div className="mt-3 flex gap-2">
         <Button className="flex-1 text-xs" onClick={() => regenerateLayout(false)}>
           Regenerate
         </Button>
-        <Button className="flex-1 text-xs" onClick={rebalance}>
+        {multi && (
+          <Button className="flex-1 text-xs" onClick={() => rezone()}>
+            Re-zone
+          </Button>
+        )}
+        <Button className="flex-1 text-xs" onClick={() => rebalance()}>
           Rebalance airflow
         </Button>
       </div>
       <FramingPanel framing={result.framing} />
+    </Section>
+  );
+}
+
+function UnitPanel({ project, result, sys }: { project: Project; result: EngineResult; sys: Layout }) {
+  const select = useStore((s) => s.select);
+  const info = result.systems.find((s) => s.id === sys.id);
+  const ahu = sys.airHandler;
+  const nominal = defaultConfig.nominalTons.includes(ahu.tons) && ahu.capacityBtuh === ahu.tons * 12000;
+  const [custom, setCustom] = useState(!nominal);
+  const supplyTotal = sys.registers.filter((r) => r.kind === 'supply').reduce((s, r) => s + r.targetCfm, 0);
+  const returnTotal = sys.registers.filter((r) => r.kind === 'return').reduce((s, r) => s + r.targetCfm, 0);
+  const rooms = project.rooms.filter((r) => info?.roomIds.includes(r.id));
+  return (
+    <Section title="Main unit" actions={<CloseBtn />}>
+      <div className="flex items-center justify-between gap-3 py-1 text-sm">
+        <span className="text-gray-500">Tag</span>
+        <input className="w-32 rounded-md border border-gray-300 px-2 py-1 text-right text-sm" value={sys.name} onChange={(e) => renameSystem(sys.id, e.target.value)} />
+      </div>
+      <div className="flex items-center justify-between gap-3 py-1 text-sm">
+        <span className="text-gray-500">Size</span>
+        <select
+          className="rounded-md border border-gray-300 px-2 py-1 text-sm"
+          value={custom ? 'custom' : ahu.tons}
+          onChange={(e) => {
+            if (e.target.value === 'custom') return setCustom(true);
+            setCustom(false);
+            setAirHandlerTons(sys.id, Number(e.target.value));
+          }}
+        >
+          {defaultConfig.nominalTons.map((t) => (
+            <option key={t} value={t}>
+              {t} ton{t === info?.recommended.tons ? ' (recommended)' : ''}
+            </option>
+          ))}
+          <option value="custom">Custom unit…</option>
+        </select>
+      </div>
+      {custom ? (
+        <>
+          <div className="flex items-center justify-between gap-3 py-1 text-sm">
+            <span className="text-gray-500">Rated capacity</span>
+            <NumberInput className="w-36" value={ahu.capacityBtuh} min={6000} max={600000} step={500} suffix="BTU/h" onChange={(v) => setCustomUnit(sys.id, { capacityBtuh: v })} />
+          </div>
+          <div className="flex items-center justify-between gap-3 py-1 text-sm">
+            <span className="text-gray-500">Rated airflow</span>
+            <NumberInput className="w-36" value={ahu.airflowCfm} min={200} max={20000} step={25} suffix="CFM" onChange={(v) => setCustomUnit(sys.id, { airflowCfm: v })} />
+          </div>
+        </>
+      ) : (
+        <>
+          <Row label="Capacity">{fmtBtuh(ahu.capacityBtuh)}</Row>
+          <Row label="Airflow">{fmtCfm(ahu.airflowCfm)}</Row>
+        </>
+      )}
+      {info && (
+        <Row label="Zone load">
+          <span className={ahu.capacityBtuh < info.totals.coolingBtuh ? 'text-danger' : ''}>{fmtBtuh(info.totals.coolingBtuh)}</span>
+        </Row>
+      )}
+      <Row label="Supply registers total">{fmtCfm(supplyTotal)}</Row>
+      <Row label="Returns total">{fmtCfm(returnTotal)}</Row>
+      <Row label="Position">
+        {ahu.position.x.toFixed(1)}, {ahu.position.y.toFixed(1)} ft
+      </Row>
+      <div className="mt-2 text-xs text-gray-500">Zone: {rooms.map((r) => r.name).join(', ') || '—'}</div>
+      <Button className="mt-3 w-full text-xs" onClick={() => rebalance(sys.id)}>
+        Rebalance registers to {fmtCfm(ahu.airflowCfm)}
+      </Button>
+      <Button variant="ghost" className="mt-1 w-full text-xs" onClick={() => regenerateLayout(true)}>
+        Re-route from the units' current spots
+      </Button>
+      <button className="mt-1 w-full text-xs text-accent hover:underline" onClick={() => select(trunkId(sys.id))}>
+        Show its supply trunk
+      </button>
     </Section>
   );
 }
@@ -392,14 +503,14 @@ function Warnings({ result }: { result: EngineResult }) {
         <ul className="space-y-1.5">
           {ws.map((w) => (
             <li key={w.id} className="rounded-md border border-red-100 bg-red-50/60 hover:border-red-200">
-              <button onClick={() => select(w.componentIds.find((id) => id !== 'ahu') ?? w.componentIds[0])} className="flex w-full gap-2 px-3 py-2 text-left text-sm">
+              <button onClick={() => select(w.componentIds.find((id) => !id.startsWith('ahu:')) ?? w.componentIds[0])} className="flex w-full gap-2 px-3 py-2 text-left text-sm">
                 <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${w.severity === 'error' ? 'bg-danger' : 'bg-amber-500'}`} />
                 <span className="text-gray-800">{w.message}</span>
               </button>
               {w.fix?.kind === 'split-register' && (
                 <div className="px-3 pb-2 pl-7">
                   <Button className="!py-1 text-xs" onClick={() => splitRegister(w.fix!.registerId, w.fix!.parts)}>
-                    Split into {w.fix.parts} {w.componentIds.some((id) => id.startsWith('return-')) ? 'grilles' : 'registers'}
+                    Split into {w.fix.parts} {w.componentIds.some((id) => /(^|\/)return-/.test(id)) ? 'grilles' : 'registers'}
                   </Button>
                 </div>
               )}

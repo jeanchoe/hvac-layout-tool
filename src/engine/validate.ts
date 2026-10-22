@@ -160,7 +160,7 @@ export function validate({ rooms, walls, loads, layout, route, config = defaultC
 
   const inArea = equipmentAreas.some((a) => pointInPolygon(ahu.position, a.polygon));
   if (equipmentAreas.length && !inArea) {
-    warnings.push({ id: 'unit-outside-area', code: 'UNIT_OUTSIDE_EQUIPMENT_AREA', severity: 'warning', message: 'The air handler is outside the equipment areas marked on this floor.', componentIds: [ahu.id] });
+    warnings.push({ id: 'unit-outside-area', code: 'UNIT_OUTSIDE_EQUIPMENT_AREA', severity: 'warning', message: 'The unit is outside the equipment areas marked on this floor. Move it into one, or enlarge an area (or add one) so every unit fits.', componentIds: [ahu.id] });
   } else if (!inArea && !rooms.some((r) => pointInPolygon(ahu.position, r.polygon))) {
     // A unit in a marked area (a roof or mezzanine) may sit outside the traced rooms.
     warnings.push({ id: 'ahu-outside', code: 'AHU_OUTSIDE_BUILDING', severity: 'warning', message: 'The air handler is outside the traced rooms.', componentIds: [ahu.id] });

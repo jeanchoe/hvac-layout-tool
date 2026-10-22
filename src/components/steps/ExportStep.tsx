@@ -11,7 +11,8 @@ export function ExportStep() {
   const project = useStore((s) => s.project);
   const setStep = useStore((s) => s.setStep);
   const results = engineResults(project);
-  const floors = sortedFloors(project.floors).filter((f) => project.layouts[f.id]);
+  const floors = sortedFloors(project.floors).filter((f) => project.layouts[f.id]?.length);
+  const units = floors.flatMap((f) => project.layouts[f.id].map((s) => s.airHandler));
   const building = Object.values(results)[0].building;
   const warningCount = Object.values(results).reduce((n, r) => n + r.warnings.length, 0);
   const [pdf, setPdf] = useState<{ url: string; blob: Blob } | null>(null);
@@ -40,9 +41,9 @@ export function ExportStep() {
         <div className="grid grid-cols-2 gap-3">
           <Stat label="Area" value={fmtSqFt(building.totals.areaSqFt)} sub={floors.length > 1 ? `${floors.length} floors` : undefined} />
           <Stat
-            label={floors.length > 1 ? 'Systems' : 'System'}
-            value={floors.length ? floors.map((f) => `${project.layouts[f.id].airHandler.tons} t`).join(' + ') : '—'}
-            sub={floors.length ? fmtCfm(floors.reduce((s, f) => s + project.layouts[f.id].airHandler.airflowCfm, 0)) : undefined}
+            label={units.length > 1 ? `${units.length} units` : 'System'}
+            value={units.length ? units.map((u) => `${u.tons} t`).join(' + ') : '—'}
+            sub={units.length ? fmtCfm(units.reduce((s, u) => s + u.airflowCfm, 0)) : undefined}
           />
           <Stat label="Cooling" value={fmtBtuh(building.totals.coolingBtuh)} />
           <Stat label="Warnings" value={warningCount} />

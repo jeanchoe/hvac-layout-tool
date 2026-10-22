@@ -3,7 +3,7 @@ import { Canvas, useThree, type ThreeEvent } from '@react-three/fiber';
 import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
-import { defaultConfig, floorElevations, joistGrid, joistPositions, type EngineResult, type JoistGrid } from '../engine';
+import { defaultConfig, floorElevations, joistGrid, joistPositions, systemOf, type EngineResult, type JoistGrid } from '../engine';
 import { bbox, centroid, dist } from '../engine/geometry';
 import { draggableKind, moveComponent } from '../state/layoutActions';
 import { useStore } from '../state/store';
@@ -127,7 +127,8 @@ function Ghost({ children }: { children: React.ReactNode }) {
 }
 
 function FloorContent({ project, result, elevation, ghost, selectedId, wallMode, showLabels, showFraming }: FloorProps) {
-  const layout = project.layouts[result.floorId];
+  const systems = project.layouts[result.floorId] ?? [];
+  const layout = systems.length ? systems : undefined;
   const select = useStore((s) => s.select);
   const warned = useMemo(() => new Set(result.warnings.flatMap((w) => w.componentIds)), [result.warnings]);
   const maxCeiling = Math.max(8, ...result.rooms.map((r) => r.ceilingHeight));
@@ -161,7 +162,7 @@ function FloorContent({ project, result, elevation, ghost, selectedId, wallMode,
   const ductTop = Math.max(maxCeiling + framingDepthFt, ...result.ducts.map((d) => ductHeight(d) + halfHeight(d)));
   const plenumTop = ductTop + 0.5;
 
-  const isSel = (id: string) => id === selectedId || (id.startsWith('trunk') && !!selectedId?.startsWith('trunk'));
+  const isSel = (id: string) => id === selectedId;
   const colorFor = (id: string, base: string) => (isSel(id) ? COLORS.select : warned.has(id) ? COLORS.danger : base);
 
   const body = (
@@ -221,15 +222,15 @@ function FloorContent({ project, result, elevation, ghost, selectedId, wallMode,
           {result.ducts.map((d) => {
             const isTrunk = d.type === 'trunk' && d.side === 'supply';
             const y = ductHeight(d);
-            const id = isTrunk ? 'trunk' : d.id;
+            const id = isTrunk ? `${d.id.split('/')[0]}/trunk` : d.id;
             return (
               <MaybeDrag ghost={ghost} layout={layout} elevation={elevation} key={d.id} id={id} height={y}>
-                <Duct duct={d} y={y} color={colorFor(isTrunk ? 'trunk' : d.id, d.side === 'supply' ? COLORS.supply : COLORS.return)} highlight={warned.has(d.id)} />
+                <Duct duct={d} y={y} color={colorFor(isSel(id) ? id : d.id, d.side === 'supply' ? COLORS.supply : COLORS.return)} highlight={warned.has(d.id)} />
               </MaybeDrag>
             );
           })}
 
-          {layout.registers.map((r) => {
+          {systems.flatMap((sys) => sys.registers).map((r) => {
             const room = roomById.get(r.roomId);
             const ceil = room?.ceilingHeight ?? 8;
             const branch = branchOf.get(r.id);
@@ -258,24 +259,31 @@ function FloorContent({ project, result, elevation, ghost, selectedId, wallMode,
             );
           })}
 
-          <MaybeDrag ghost={ghost} layout={layout} elevation={elevation} id="ahu" height={AHU_SIZE.h}>
-            <group position={[layout.airHandler.position.x, 0, layout.airHandler.position.y]}>
-              <mesh position={[0, AHU_SIZE.h / 2, 0]}>
-                <boxGeometry args={[AHU_SIZE.w, AHU_SIZE.h, AHU_SIZE.d]} />
-                <meshStandardMaterial color={colorFor('ahu', '#334155')} emissive={isSel('ahu') ? COLORS.select : '#000'} emissiveIntensity={0.3} />
-              </mesh>
-              {/* Plenum rises above the duct runs so the unit stays easy to grab from any angle. */}
-              <mesh position={[0, (AHU_SIZE.h + plenumTop) / 2, 0]}>
-                <boxGeometry args={[2, plenumTop - AHU_SIZE.h, 2]} />
-                <meshStandardMaterial color={isSel('ahu') ? COLORS.select : '#94a3b8'} />
-              </mesh>
-              {showLabels && (
-                <Html position={[0, plenumTop + 0.6, 0]} center style={{ pointerEvents: 'none' }}>
-                  <div className="whitespace-nowrap rounded bg-gray-900 px-1.5 py-0.5 text-[10px] font-semibold text-white">AHU {layout.airHandler.tons} t</div>
-                </Html>
-              )}
-            </group>
-          </MaybeDrag>
+          {systems.map((sys) => {
+            const ahu = sys.airHandler;
+            return (
+              <MaybeDrag ghost={ghost} layout={layout} elevation={elevation} key={ahu.id} id={ahu.id} height={AHU_SIZE.h}>
+                <group position={[ahu.position.x, 0, ahu.position.y]}>
+                  <mesh position={[0, AHU_SIZE.h / 2, 0]}>
+                    <boxGeometry args={[AHU_SIZE.w, AHU_SIZE.h, AHU_SIZE.d]} />
+                    <meshStandardMaterial color={colorFor(ahu.id, '#334155')} emissive={isSel(ahu.id) ? COLORS.select : '#000'} emissiveIntensity={0.3} />
+                  </mesh>
+                  {/* Plenum rises above the duct runs so the unit stays easy to grab from any angle. */}
+                  <mesh position={[0, (AHU_SIZE.h + plenumTop) / 2, 0]}>
+                    <boxGeometry args={[2, plenumTop - AHU_SIZE.h, 2]} />
+                    <meshStandardMaterial color={isSel(ahu.id) ? COLORS.select : '#94a3b8'} />
+                  </mesh>
+                  {showLabels && (
+                    <Html position={[0, plenumTop + 0.6, 0]} center style={{ pointerEvents: 'none' }}>
+                      <div className="whitespace-nowrap rounded bg-gray-900 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                        {sys.name} · {ahu.tons} t
+                      </div>
+                    </Html>
+                  )}
+                </group>
+              </MaybeDrag>
+            );
+          })}
         </>
       )}
 
@@ -419,7 +427,7 @@ function Joists({ rooms, grid, ceiling, depthFt, attic }: { rooms: Room[]; grid:
 }
 
 /** Draggable on the floor being edited; plain on ghost floors. Drag heights are in world space. */
-function MaybeDrag({ ghost, layout, elevation, id, height, children }: { ghost: boolean; layout: Layout | undefined; elevation: number; id: string; height: number; children: React.ReactNode }) {
+function MaybeDrag({ ghost, layout, elevation, id, height, children }: { ghost: boolean; layout: Layout[] | undefined; elevation: number; id: string; height: number; children: React.ReactNode }) {
   if (ghost || !layout) return <>{children}</>;
   return (
     <Draggable id={id} height={height + elevation} layout={layout}>
@@ -429,7 +437,7 @@ function MaybeDrag({ ghost, layout, elevation, id, height, children }: { ghost: 
 }
 
 /** Click to inspect; drag (for movable components) along a horizontal plane at `height`. */
-function Draggable({ id, height, layout, children }: { id: string; height: number; layout: Layout; children: React.ReactNode }) {
+function Draggable({ id, height, layout, children }: { id: string; height: number; layout: Layout[]; children: React.ReactNode }) {
   const select = useStore((s) => s.select);
   const controls = useThree((s) => s.controls) as OrbitControlsImpl | null;
   const drag = useRef<{ plane: THREE.Plane; offset: Pt; moved: boolean } | null>(null);
@@ -438,9 +446,10 @@ function Draggable({ id, height, layout, children }: { id: string; height: numbe
     return e.ray.intersectPlane(plane, v) ? { x: v.x, y: v.z } : null;
   };
   const position = (): Pt => {
-    const L = layout;
-    if (id === 'ahu') return L.airHandler.position;
-    if (id === 'trunk') return L.trunk.axis === 'x' ? { x: 0, y: L.trunk.offset } : { x: L.trunk.offset, y: 0 };
+    const L = systemOf(layout, id);
+    if (!L) return { x: 0, y: 0 };
+    if (id === L.airHandler.id) return L.airHandler.position;
+    if (id.endsWith('/trunk')) return L.trunk.axis === 'x' ? { x: 0, y: L.trunk.offset } : { x: L.trunk.offset, y: 0 };
     return L.registers.find((r) => r.id === id)?.position ?? { x: 0, y: 0 };
   };
   type Capturable = { setPointerCapture(id: number): void; releasePointerCapture(id: number): void };

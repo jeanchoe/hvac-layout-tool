@@ -128,10 +128,22 @@ function reducingRun(prefix: string, side: DuctSegment['side'], stops: { t: numb
  * Joist bays: the trunk (and a parallel return trunk) cross the joists in a soffit, and every
  * branch runs along the joists inside its bay.
  */
-export function routeDucts(rooms: Room[], layout: Layout, config: EngineConfig = defaultConfig, framingIn?: Framing, beams: Beam[] = []): RouteResult {
+/**
+ * Routes one system's ducts to its registers. `rooms` are the rooms it serves; `floorRooms` (default:
+ * the same) is the whole floor, whose ceilings the ducts may cross and whose framing they share.
+ */
+export function routeDucts(rooms: Room[], layout: Layout, config: EngineConfig = defaultConfig, framingIn?: Framing, beams: Beam[] = [], idPrefix = '', floorRooms: Room[] = rooms): RouteResult {
+  const result = routeSystem(rooms, layout, config, framingIn, beams, floorRooms);
+  if (!idPrefix) return result;
+  // With several systems on a floor, duct ids carry their system's id ("u2/branch-…").
+  const pre = (id: string) => `${idPrefix}/${id}`;
+  return { ...result, ducts: result.ducts.map((d) => ({ ...d, id: pre(d.id) })), beamCrossings: result.beamCrossings.map((c) => ({ ...c, ductId: pre(c.ductId) })) };
+}
+
+function routeSystem(rooms: Room[], layout: Layout, config: EngineConfig, framingIn: Framing | undefined, beams: Beam[], floorRooms: Room[]): RouteResult {
   const framing = resolveFraming(framingIn, config);
-  if (framing.ductSpace === 'plenum') return routePlenum(rooms, layout, beams, framing, config);
-  const grid = joistGrid(rooms, framing, config);
+  if (framing.ductSpace === 'plenum') return routePlenum(floorRooms, layout, beams, framing, config);
+  const grid = joistGrid(floorRooms, framing, config);
   const { airHandler, trunk, registers } = layout;
   const ducts: DuctSegment[] = [];
   const branchLength: Record<string, number> = {};

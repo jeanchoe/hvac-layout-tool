@@ -1,4 +1,4 @@
-import type { Floor, Framing, Project, Pt, Room } from '../types';
+import type { Floor, Framing, Layout, Project, Pt, Room } from '../types';
 import { defaultConfig, resolveFraming, type EngineConfig } from './config';
 import { bbox, pointInPolygon, polygonArea } from './geometry';
 
@@ -109,7 +109,8 @@ export const newFloor = (id: string, level: number, name = `Floor ${level + 1}`)
 export function migrateProject(raw: unknown): Project {
   const p = raw as Record<string, unknown> & Partial<Project>;
   if (!p || typeof p !== 'object' || !Array.isArray(p.rooms)) throw new Error('That file is not an HVAC Layout Tool project.');
-  if (p.schemaVersion === 2) return p as Project;
+  if (p.schemaVersion === 3) return p as Project;
+  if (p.schemaVersion === 2) return upgradeV2(p as unknown as Project);
   if (p.schemaVersion !== 1) throw new Error('That project was saved by a newer version of this tool.');
   // v1: one floor, with the plan image, scale and layout stored on the project itself.
   const floor: Floor = {
@@ -119,11 +120,24 @@ export function migrateProject(raw: unknown): Project {
     scaleLine: (p.scaleLine as Floor['scaleLine']) ?? null,
   };
   const { background: _b, scalePxPerFt: _s, scaleLine: _l, layout, ...rest } = p as Record<string, unknown>;
-  return {
+  return upgradeV2({
     ...(rest as unknown as Project),
-    schemaVersion: 2,
+    schemaVersion: 2 as unknown as 3,
     floors: [floor],
     rooms: (p.rooms as Room[]).map((r) => ({ ...r, floorId: r.floorId ?? floor.id })),
-    layouts: layout ? { [floor.id]: layout as Project['layouts'][string] } : {},
-  };
+    layouts: (layout ? { [floor.id]: layout } : {}) as unknown as Project['layouts'],
+  });
 }
+
+/** v2 had one layout per floor; v3 has a list of systems per floor. */
+function upgradeV2(p: Project): Project {
+  const layouts: Project['layouts'] = {};
+  for (const [floorId, raw] of Object.entries(p.layouts as unknown as Record<string, Layout | Layout[]>)) {
+    if (Array.isArray(raw)) layouts[floorId] = raw;
+    else if (raw) layouts[floorId] = [{ ...raw, id: 'u1', name: 'AHU-1', roomIds: null, airHandler: { ...raw.airHandler, id: unitTagId('u1') } }];
+  }
+  return { ...p, schemaVersion: 3, layouts };
+}
+
+/** Component id of a system's main unit. */
+export const unitTagId = (systemId: string) => `ahu:${systemId}`;

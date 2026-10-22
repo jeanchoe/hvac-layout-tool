@@ -38,6 +38,8 @@ export interface EngineConfig {
   cfmPerTon: number;
   btuhPerTon: number;
   nominalTons: number[];
+  /** Largest unit before a floor is split into more zones, each with its own unit (tons). */
+  maxUnitTons: number;
   maxCfmPerSupplyRegister: number;
   /** Smallest airflow worth a register; tiny rooms get at least this much. */
   minCfmPerSupplyRegister: number;

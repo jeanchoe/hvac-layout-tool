@@ -15,7 +15,7 @@ const AUTOSAVE_KEY = 'hvac-layout-tool:autosave';
 export function emptyProject(): Project {
   const now = new Date().toISOString();
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     id: newId('p'),
     name: 'Untitled project',
     zipCode: '',

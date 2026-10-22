@@ -282,13 +282,17 @@ export interface GenerateInput {
   beams?: Beam[];
   /** Where the unit may go; none = anywhere near the plan centre. */
   equipmentAreas?: EquipmentArea[];
+  /** Spots other units already use: keep clear of them. */
+  avoidSpots?: Pt[];
+  /** Every room on the floor (default: `rooms`). Ducts may run over other zones; framing is shared. */
+  floorRooms?: Room[];
 }
 
 /** Builds a starting layout: tries nearby variations and keeps the best score. */
 export function generateLayout(input: GenerateInput): { layout: Layout; score: LayoutScore } {
-  const { rooms, walls, loads, tons, config, framing, beams = [], equipmentAreas = [] } = input;
+  const { rooms, walls, loads, tons, config, framing, beams = [], equipmentAreas = [], floorRooms = rooms } = input;
   const plenum = framing.ductSpace === 'plenum';
-  const grid = joistGrid(rooms, framing, config);
+  const grid = joistGrid(floorRooms, framing, config);
   const equipment = equipmentForTons(tons, config);
   const supply = placeSupplyRegisters(rooms, walls, loads, equipment.airflowCfm, config, grid);
   const b = bbox(rooms.flatMap((r) => r.polygon));
@@ -305,6 +309,19 @@ export function generateLayout(input: GenerateInput): { layout: Layout; score: L
         ? airHandlerCandidates(rooms).sort((p, q) => dist(p, centre) - dist(q, centre)).slice(0, 12)
         : airHandlerCandidates(rooms);
   const shifts = plenum ? [0] : [0, -3, 3];
+  // Keep clear of units already placed on this floor (unless nowhere else is possible).
+  const isClear = (p: Pt) => (input.avoidSpots ?? []).every((q) => dist(p, q) >= 4);
+  const clear = ahuSpots.filter(isClear);
+  if (!input.airHandlerPosition) {
+    if (clear.length) ahuSpots.splice(0, ahuSpots.length, ...clear);
+    else if (equipmentAreas.length) {
+      // The equipment areas are full: go as close to them as possible rather than stack units on
+      // top of each other. Validation then flags the unit as outside an equipment area.
+      const toArea = (p: Pt) => Math.min(...ahuSpots.map((q) => dist(p, q)));
+      const near = airHandlerCandidates(rooms).filter(isClear).sort((p, q) => toArea(p) - toArea(q)).slice(0, 6);
+      if (near.length) ahuSpots.splice(0, ahuSpots.length, ...near);
+    }
+  }
 
   let best: { layout: Layout; score: LayoutScore } | null = null;
   for (const pos of ahuSpots) {
@@ -315,8 +332,8 @@ export function generateLayout(input: GenerateInput): { layout: Layout; score: L
         const trunk: Trunk = { axis, offset: (axis === 'x' ? pos.y : pos.x) + shift };
         // Between joists the central return depends on where the trunk soffit is.
         const returns = atticReturns ?? placeReturns(rooms, pos, supply, equipment.airflowCfm, config, grid, trunk);
-        const layout: Layout = { airHandler, trunk, registers: [...supply, ...returns], roomsSignature: input.roomsSignature };
-        const route = routeDucts(rooms, layout, config, framing, beams);
+        const layout: Layout = { id: 'u1', name: 'AHU-1', roomIds: null, airHandler, trunk, registers: [...supply, ...returns], roomsSignature: input.roomsSignature };
+        const route = routeDucts(rooms, layout, config, framing, beams, '', floorRooms);
         const warnings = validate({ rooms, walls, loads, layout, route, config, beams, equipmentAreas });
         const score = scoreLayout(rooms, loads, layout, route, warnings, config);
         if (!best || score.total < best.score.total) best = { layout, score };

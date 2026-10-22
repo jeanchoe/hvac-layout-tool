@@ -4,16 +4,16 @@ import type { DesignInputs, Framing, Layout, Project, Room } from '../types';
 import { climateForZip, defaultConfig, resolveDesign, type EngineConfig } from './config';
 import { branchEfficiency, fitDuct, rectEquivalentDiameter, sizeDuct } from './ductSizing';
 import { acrossJoists, bootHitsJoist, joistGrid } from './framing';
-import { polygonArea } from './geometry';
+import { centroid, polygonArea } from './geometry';
 import { routeTree } from './pathfind';
 import { assignAirflow, equipmentForTons, simplifiedLoadModel, sizeEquipment, type LoadLine } from './load';
 import { deriveWalls } from './walls';
-import { analyzeBuilding, defaultFloorId, floorElevations, floorFraming, newFloor, roomExposure, evaluate, evaluateAll, generateAllLayouts, migrateProject, rebalanceAirflow, roomsOnFloor, splitRegister, usableRooms } from './index';
+import { analyzeBuilding, autoUnitCount, generateFloorSystems, partitionZones, defaultFloorId, floorElevations, floorFraming, newFloor, roomExposure, evaluate, evaluateAll, generateAllLayouts, migrateProject, rebalanceAirflow, roomsOnFloor, splitRegister, usableRooms } from './index';
 
 const withLayout = (p: Project): Project => ({ ...p, layouts: generateAllLayouts(p) });
 /** The ground floor's layout, for single-floor tests. */
-const layoutOf = (p: Project): Layout => p.layouts[defaultFloorId(p)];
-const withFloorLayout = (p: Project, layout: Layout | null): Project => ({ ...p, layouts: layout ? { ...p.layouts, [defaultFloorId(p)]: layout } : {} });
+const layoutOf = (p: Project): Layout => p.layouts[defaultFloorId(p)][0];
+const withFloorLayout = (p: Project, layout: Layout | null): Project => ({ ...p, layouts: layout ? { ...p.layouts, [defaultFloorId(p)]: [layout] } : {} });
 const codes = (p: Project) => evaluate(p).warnings.map((w) => w.code);
 const box = (id: string, x0: number, y0: number, x1: number, y1: number, extra: Partial<Room> = {}): Room => ({
   id,
@@ -217,7 +217,7 @@ describe('duct sizing', () => {
 describe.each(SAMPLE_PLANS)('sample plan: $name', (plan) => {
   const project = withLayout(buildSampleProject(plan));
   const results = evaluateAll(project);
-  const floors = project.floors.map((f) => ({ f, layout: project.layouts[f.id], result: results[f.id], rooms: usableRooms(roomsOnFloor(project.rooms, f.id)) }));
+  const floors = project.floors.map((f) => ({ f, layout: project.layouts[f.id][0], result: results[f.id], rooms: usableRooms(roomsOnFloor(project.rooms, f.id)) }));
 
   it('room areas match the labeled areas within 5%', () => {
     project.rooms.forEach((room, i) => {
@@ -482,7 +482,7 @@ describe('multiple floors', () => {
   it('upgrades a v1 (single-floor) project file', () => {
     const v1 = { schemaVersion: 1, id: 'p', name: 'Old', zipCode: '27601', buildingType: 'single-story-residential', systemType: 'forced-air-ducted', scalePxPerFt: 20, scaleLine: null, background: null, rooms: [{ ...box('a', 0, 0, 10, 10), floorId: undefined }], layout: null, createdAt: '', updatedAt: '' };
     const v2 = migrateProject(v1);
-    expect(v2.schemaVersion).toBe(2);
+    expect(v2.schemaVersion).toBe(3);
     expect(v2.floors).toHaveLength(1);
     expect(v2.floors[0]).toMatchObject({ level: 0, scalePxPerFt: 20 });
     expect(v2.rooms[0].floorId).toBe(v2.floors[0].id);
@@ -648,5 +648,86 @@ describe('ceiling plenum: pathfinding around beams', () => {
     const t0 = performance.now();
     for (let i = 0; i < 5; i++) evaluateAll(project);
     expect((performance.now() - t0) / 5).toBeLessThan(200);
+  });
+});
+
+describe('zones and multiple units', () => {
+  const base = buildSampleProject(SAMPLE_PLANS.find((p) => p.id === 't-shape')!);
+  const twoUnits: Project = { ...base, floors: base.floors.map((f) => ({ ...f, unitCount: 2 })) };
+  const systems = generateFloorSystems(twoUnits);
+  const project: Project = { ...twoUnits, layouts: { f1: systems } };
+  const result = evaluate(project);
+
+  it('splits the floor into compact zones of similar load, covering every room once', () => {
+    const a = analyzeBuilding(base);
+    const zones = partitionZones(a.rooms, a.loads, 2);
+    expect(zones).toHaveLength(2);
+    const all = zones.flat().map((r) => r.id);
+    expect(new Set(all).size).toBe(a.rooms.length);
+    const load = (z: Room[]) => z.reduce((s, r) => s + a.loads.find((l) => l.roomId === r.id)!.coolingBtuh, 0);
+    const [l1, l2] = zones.map(load);
+    expect(Math.min(l1, l2) / Math.max(l1, l2)).toBeGreaterThan(0.6);
+  });
+
+  it('adds a unit when a floor would need more than the largest unit', () => {
+    expect(autoUnitCount(4.5 * 12000)).toBe(1);
+    expect(autoUnitCount(7 * 12000)).toBe(2);
+    expect(autoUnitCount(16 * 12000)).toBe(4);
+  });
+
+  it('gives each zone its own unit, sized by the zone load', () => {
+    expect(systems.map((s) => [s.id, s.name])).toEqual([
+      ['u1', 'AHU-1'],
+      ['u2', 'AHU-2'],
+    ]);
+    for (const s of result.systems) expect(s.recommended.tons).toBeLessThan(result.recommended.tons + 0.01);
+    for (const sys of systems) {
+      const sum = (k: string) => sys.registers.filter((r) => r.kind === k).reduce((t, r) => t + r.targetCfm, 0);
+      expect(sum('supply')).toBe(sys.airHandler.airflowCfm);
+      expect(sum('return')).toBe(sys.airHandler.airflowCfm);
+      for (const r of sys.registers) expect(sys.roomIds).toContain(r.roomId);
+    }
+    expect(Math.hypot(systems[0].airHandler.position.x - systems[1].airHandler.position.x, systems[0].airHandler.position.y - systems[1].airHandler.position.y)).toBeGreaterThanOrEqual(3);
+  });
+
+  it('routes each system separately with no warnings, ids tagged by system', () => {
+    expect(result.warnings.map((w) => w.message)).toEqual([]);
+    expect(result.ducts.every((d) => /^u[12]\//.test(d.id))).toBe(true);
+    expect(new Set(result.ducts.map((d) => d.id)).size).toBe(result.ducts.length);
+  });
+
+  it('flags a room no unit serves, and marks a zone change as stale', () => {
+    const [s1, s2] = systems;
+    const moved = s1.roomIds![0];
+    const dropped: Project = { ...project, layouts: { f1: [{ ...s1, roomIds: s1.roomIds!.slice(1) }, s2] } };
+    expect(evaluate(dropped).warnings.find((w) => w.code === 'ROOM_NOT_SERVED')?.componentIds).toEqual([moved]);
+    const reassigned: Project = { ...project, layouts: { f1: [{ ...s1, roomIds: s1.roomIds!.slice(1) }, { ...s2, roomIds: [...s2.roomIds!, moved] }] } };
+    expect(evaluate(reassigned).layoutStale).toBe(true);
+    // Regenerating keeps the user's zones.
+    const regen = generateFloorSystems(reassigned);
+    expect(regen[1].roomIds).toContain(moved);
+    expect(generateFloorSystems(reassigned, { rezone: true })[1].roomIds).not.toEqual(regen[1].roomIds);
+  });
+
+  it('never stacks units when the equipment area only fits one; the overflow is flagged instead', () => {
+    const c = centroid(base.rooms[0].polygon);
+    const small = [{ x: c.x - 2.5, y: c.y - 1.5 }, { x: c.x + 2.5, y: c.y - 1.5 }, { x: c.x + 2.5, y: c.y + 1.5 }, { x: c.x - 2.5, y: c.y + 1.5 }];
+    const p0: Project = { ...twoUnits, equipmentAreas: [{ id: 'ea1', floorId: 'f1', name: 'Mech', polygon: small }] };
+    const sys = generateFloorSystems(p0);
+    const [a, b] = sys.map((s) => s.airHandler.position);
+    expect(Math.hypot(a.x - b.x, a.y - b.y)).toBeGreaterThanOrEqual(4);
+    const ws = evaluate({ ...p0, layouts: { f1: sys } }).warnings;
+    expect(ws.some((w) => w.code === 'COMPONENT_OVERLAP')).toBe(false);
+    expect(ws.filter((w) => w.code === 'UNIT_OUTSIDE_EQUIPMENT_AREA')).toHaveLength(1);
+  });
+
+  it('upgrades a v2 project (one layout per floor) to a list of systems', () => {
+    const one = generateFloorSystems(base)[0];
+    const v2 = { ...base, schemaVersion: 2, layouts: { f1: { ...one, id: undefined, name: undefined, roomIds: undefined, airHandler: { ...one.airHandler, id: 'ahu' } } } };
+    const v3 = migrateProject(JSON.parse(JSON.stringify(v2)));
+    expect(v3.schemaVersion).toBe(3);
+    expect(v3.layouts.f1).toHaveLength(1);
+    expect(v3.layouts.f1[0]).toMatchObject({ id: 'u1', name: 'AHU-1', roomIds: null });
+    expect(v3.layouts.f1[0].airHandler.id).toBe('ahu:u1');
   });
 });

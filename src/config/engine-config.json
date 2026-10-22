@@ -144,6 +144,7 @@
     4,
     5
   ],
+  "maxUnitTons": 5,
   "maxCfmPerSupplyRegister": 150,
   "minCfmPerSupplyRegister": 25,
   "registerInsetFromWallFt": 1.0,

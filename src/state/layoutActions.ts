@@ -1,4 +1,4 @@
-import { equipmentForTons, generateProjectLayout, newFloor, rebalanceAirflow, resolveFraming, snapToBay, sortedFloors, splitRegister as splitRegisterLayout, type DesignKey } from '../engine';
+import { equipmentForTons, generateFloorSystems, newFloor, rebalanceAirflow, resolveFraming, snapToBay, sortedFloors, splitRegister as splitRegisterLayout, systemOf, type DesignKey } from '../engine';
 import { newId } from '../lib/ids';
 import type { Floor, Framing, Layout, Pt } from '../types';
 import { engineResult } from './engine';
@@ -8,14 +8,17 @@ const snapFt = (v: number) => Math.round(v * 4) / 4;
 
 /** Every layout action works on the floor being viewed. */
 const floorId = () => currentFloor().id;
-const currentLayout = (): Layout | undefined => useStore.getState().project.layouts[floorId()];
+const currentSystems = (): Layout[] => useStore.getState().project.layouts[floorId()] ?? [];
+
+/** Selection id for a system's supply trunk. */
+export const trunkId = (systemId: string) => `${systemId}/trunk`;
 
 /** Kinds of layout component a user can drag. */
 export function draggableKind(id: string | null): 'ahu' | 'trunk' | 'register' | null {
   if (!id) return null;
-  if (id === 'ahu') return 'ahu';
-  if (id === 'trunk' || id.startsWith('trunk-')) return 'trunk';
-  return currentLayout()?.registers.some((r) => r.id === id) ? 'register' : null;
+  if (id.startsWith('ahu:')) return 'ahu';
+  if (id.endsWith('/trunk')) return 'trunk';
+  return currentSystems().some((s) => s.registers.some((r) => r.id === id)) ? 'register' : null;
 }
 
 /** Moves a layout component during a drag (call `checkpoint()` once when the drag starts). */
@@ -29,7 +32,7 @@ export function moveComponent(id: string, p: Pt) {
   const f = floorId();
   useStore.getState().update(
     (d) => {
-      const L = d.layouts[f];
+      const L = systemOf(d.layouts[f] ?? [], id);
       if (!L) return;
       if (kind === 'ahu') {
         // The trunk runs through the air handler, so it follows it.
@@ -46,52 +49,127 @@ export function moveComponent(id: string, p: Pt) {
   );
 }
 
-/** Sets (or clears, with null) one floor's layout. */
-function setLayout(f: string, layout: Layout | null) {
+/** Sets one floor's systems (an empty list clears the floor). */
+function setSystems(f: string, systems: Layout[]) {
   useStore.getState().update((d) => {
     const next = { ...d.layouts };
-    if (layout) next[f] = layout;
+    if (systems.length) next[f] = systems;
     else delete next[f];
     d.layouts = next;
   });
 }
 
-export function regenerateLayout(keepAirHandler: boolean, f = floorId()) {
-  const { project } = useStore.getState();
-  const current = project.layouts[f];
-  const layout = generateProjectLayout(project, {
-    floorId: f,
-    airHandlerPosition: keepAirHandler ? current?.airHandler.position : undefined,
-    tons: keepAirHandler ? current?.airHandler.tons : undefined,
+/** Replaces one system on the floor. */
+function replaceSystem(f: string, system: Layout | null) {
+  if (!system) return;
+  useStore.getState().update((d) => {
+    const list = d.layouts[f];
+    const i = list?.findIndex((s) => s.id === system.id) ?? -1;
+    if (i >= 0) list![i] = system;
   });
-  setLayout(f, layout);
+}
+
+/** Re-lays out the floor's systems, keeping their zones; `keepUnits` keeps each unit's spot and size. */
+export function regenerateLayout(keepUnits: boolean, f = floorId()) {
+  setSystems(f, generateFloorSystems(useStore.getState().project, { floorId: f, keepUnits }));
+}
+
+/** Splits the floor into zones afresh, one unit each, and lays them out. */
+export function rezone(f = floorId()) {
+  setSystems(f, generateFloorSystems(useStore.getState().project, { floorId: f, rezone: true }));
+}
+
+/** Sets how many units serve the floor (undefined = automatic from the load), then re-zones. */
+export function setUnitCount(n: number | undefined) {
+  const f = floorId();
+  useStore.getState().update((d) => {
+    const floor = d.floors.find((x) => x.id === f);
+    if (!floor) return;
+    if (n === undefined) delete floor.unitCount;
+    else floor.unitCount = n;
+  });
+  rezone(f);
 }
 
 /** Generates layouts for every floor that has rooms but no layout yet (one undo step). */
 export function generateMissingLayouts() {
   const { project, update } = useStore.getState();
-  const missing = project.floors.filter((fl) => !project.layouts[fl.id] && project.rooms.some((r) => r.floorId === fl.id));
+  const missing = project.floors.filter((fl) => !project.layouts[fl.id]?.length && project.rooms.some((r) => r.floorId === fl.id));
   if (!missing.length) return;
-  const made = Object.fromEntries(missing.map((fl) => [fl.id, generateProjectLayout(project, { floorId: fl.id })]).filter(([, l]) => l));
+  const made = Object.fromEntries(missing.map((fl) => [fl.id, generateFloorSystems(project, { floorId: fl.id })]).filter(([, l]) => l.length));
   update((d) => void (d.layouts = { ...d.layouts, ...made }));
 }
 
-export function setAirHandlerTons(tons: number) {
+function editSystem(systemId: string, fn: (s: Layout) => void, coalesce?: string) {
   const f = floorId();
-  useStore.getState().update((d) => {
-    if (d.layouts[f]) Object.assign(d.layouts[f].airHandler, equipmentForTons(tons));
+  useStore.getState().update(
+    (d) => {
+      const s = d.layouts[f]?.find((x) => x.id === systemId);
+      if (s) fn(s);
+    },
+    coalesce ? { coalesce } : undefined,
+  );
+}
+
+/** Picks a standard unit size. */
+export function setAirHandlerTons(systemId: string, tons: number) {
+  editSystem(systemId, (s) => Object.assign(s.airHandler, equipmentForTons(tons)));
+}
+
+/** Enters a custom unit: its own rated capacity and airflow. */
+export function setCustomUnit(systemId: string, patch: { capacityBtuh?: number; airflowCfm?: number }) {
+  editSystem(
+    systemId,
+    (s) => {
+      if (patch.capacityBtuh !== undefined) {
+        s.airHandler.capacityBtuh = patch.capacityBtuh;
+        s.airHandler.tons = Math.round((patch.capacityBtuh / 12000) * 10) / 10;
+      }
+      if (patch.airflowCfm !== undefined) s.airHandler.airflowCfm = patch.airflowCfm;
+    },
+    `unit-${systemId}-${Object.keys(patch).join()}`,
+  );
+}
+
+export function renameSystem(systemId: string, name: string) {
+  editSystem(systemId, (s) => void (s.name = name), `name-${systemId}`);
+}
+
+/**
+ * Moves a room into another unit's zone. Its registers move with it; zones become explicit lists.
+ * Rebalance or regenerate afterwards to resize airflow.
+ */
+export function assignRoomToSystem(roomId: string, systemId: string) {
+  const f = floorId();
+  const { project, update } = useStore.getState();
+  const floorRooms = project.rooms.filter((r) => r.floorId === f).map((r) => r.id);
+  update((d) => {
+    const list = d.layouts[f];
+    const to = list?.find((s) => s.id === systemId);
+    if (!list || !to) return;
+    for (const s of list) {
+      s.roomIds = (s.roomIds ?? floorRooms).filter((id) => id !== roomId);
+      if (s !== to) {
+        const moving = s.registers.filter((r) => r.roomId === roomId);
+        s.registers = s.registers.filter((r) => r.roomId !== roomId);
+        to.registers.push(...moving);
+      }
+    }
+    to.roomIds!.push(roomId);
   });
 }
 
-export function rebalance() {
+export function rebalance(systemId?: string) {
   const f = floorId();
-  setLayout(f, rebalanceAirflow(useStore.getState().project, { floorId: f }));
+  const project = useStore.getState().project;
+  // One undo step for the whole floor.
+  setSystems(f, currentSystems().map((s) => (!systemId || s.id === systemId ? (rebalanceAirflow(project, { floorId: f, systemId: s.id }) ?? s) : s)));
 }
 
 /** Splits a register or grille into several in neighbouring bays, sharing its airflow. */
 export function splitRegister(id: string, parts: number) {
   const f = floorId();
-  setLayout(f, splitRegisterLayout(useStore.getState().project, id, parts, { floorId: f }));
+  replaceSystem(f, splitRegisterLayout(useStore.getState().project, id, parts, { floorId: f }));
   useStore.getState().select(null);
 }
 
@@ -99,7 +177,7 @@ export function setRegisterCfm(id: string, cfm: number) {
   const f = floorId();
   useStore.getState().update(
     (d) => {
-      const r = d.layouts[f]?.registers.find((x) => x.id === id);
+      const r = systemOf(d.layouts[f] ?? [], id)?.registers.find((x) => x.id === id);
       if (r) r.targetCfm = cfm;
     },
     { coalesce: `cfm-${id}` },
@@ -109,15 +187,21 @@ export function setRegisterCfm(id: string, cfm: number) {
 export function deleteRegister(id: string) {
   const f = floorId();
   useStore.getState().update((d) => {
-    if (d.layouts[f]) d.layouts[f].registers = d.layouts[f].registers.filter((r) => r.id !== id);
+    const s = systemOf(d.layouts[f] ?? [], id);
+    if (s) s.registers = s.registers.filter((r) => r.id !== id);
   });
   useStore.getState().select(null);
 }
 
+/** Adds a register to the system whose zone holds the room. */
 export function addRegister(roomId: string, kind: 'supply' | 'return', position: Pt) {
   const f = floorId();
   const id = `${kind === 'supply' ? 's' : 'r'}-${roomId}-${Math.random().toString(36).slice(2, 6)}`;
-  useStore.getState().update((d) => void d.layouts[f]?.registers.push({ id, roomId, kind, position, targetCfm: kind === 'supply' ? 75 : 100 }));
+  useStore.getState().update((d) => {
+    const list = d.layouts[f] ?? [];
+    const s = list.find((x) => x.roomIds?.includes(roomId)) ?? list.find((x) => !x.roomIds) ?? list[0];
+    s?.registers.push({ id, roomId, kind, position, targetCfm: kind === 'supply' ? 75 : 100 });
+  });
   useStore.getState().select(id);
 }
 

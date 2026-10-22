@@ -1,5 +1,5 @@
 import { useMemo, useRef } from 'react';
-import { joistPositions, type EngineResult } from '../engine';
+import { joistPositions, systemOf, type EngineResult } from '../engine';
 import { bbox, centroid, lerp, outwardNormal } from '../engine/geometry';
 import { draggableKind, moveComponent } from '../state/layoutActions';
 import { useStore } from '../state/store';
@@ -7,6 +7,10 @@ import type { Project, Pt, Wall } from '../types';
 
 /** Air systems use the usual drafting colours: supply dark blue, return pink. */
 export const COLORS = { accent: '#2563eb', supply: '#1e40af', return: '#db2777', danger: '#dc2626', wall: '#1f2937', select: '#f59e0b' };
+
+/** Tint for each unit's zone, so zones read apart on the plan and in 3D. */
+export const ZONE_COLORS = ['#2563eb', '#16a34a', '#9333ea', '#ea580c', '#0891b2', '#ca8a04'];
+export const zoneColor = (i: number) => ZONE_COLORS[i % ZONE_COLORS.length];
 
 interface Props {
   project: Project;
@@ -25,7 +29,10 @@ interface Props {
 export function PlanView({ project, result, selectedId, onSelect, showLayout, editable, focusRoomId, onWallClick, className = '' }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const drag = useRef<{ id: string; offset: Pt; moved: boolean } | null>(null);
-  const layout = project.layouts[result.floorId];
+  const systems = project.layouts[result.floorId] ?? [];
+  const layout = systems.length > 0;
+  // With several units, each room is tinted by the zone that serves it.
+  const zoneOf = useMemo(() => (systems.length > 1 ? new Map(result.systems.flatMap((s, i) => s.roomIds.map((id) => [id, zoneColor(i)] as const))) : null), [systems.length, result.systems]);
   const warned = useMemo(() => new Set(result.warnings.flatMap((w) => w.componentIds)), [result.warnings]);
 
   const pts = result.rooms.flatMap((r) => r.polygon);
@@ -39,10 +46,11 @@ export function PlanView({ project, result, selectedId, onSelect, showLayout, ed
     return { x: p.x, y: p.y };
   };
   const componentPos = (id: string): Pt | null => {
-    if (!layout) return null;
-    if (id === 'ahu') return layout.airHandler.position;
-    if (draggableKind(id) === 'trunk') return layout.trunk.axis === 'x' ? { x: 0, y: layout.trunk.offset } : { x: layout.trunk.offset, y: 0 };
-    return layout.registers.find((r) => r.id === id)?.position ?? null;
+    const sys = systemOf(systems, id);
+    if (!sys) return null;
+    if (id === sys.airHandler.id) return sys.airHandler.position;
+    if (draggableKind(id) === 'trunk') return sys.trunk.axis === 'x' ? { x: 0, y: sys.trunk.offset } : { x: sys.trunk.offset, y: 0 };
+    return sys.registers.find((r) => r.id === id)?.position ?? null;
   };
   const startDrag = (id: string) => (e: React.PointerEvent) => {
     e.stopPropagation();
@@ -63,7 +71,7 @@ export function PlanView({ project, result, selectedId, onSelect, showLayout, ed
   };
 
   const color = (id: string, base: string) => (warned.has(id) ? COLORS.danger : base);
-  const sel = (id: string) => id === selectedId || (id.startsWith('trunk') && selectedId?.startsWith('trunk'));
+  const sel = (id: string) => id === selectedId;
 
   return (
     <svg
@@ -80,7 +88,7 @@ export function PlanView({ project, result, selectedId, onSelect, showLayout, ed
         const focus = room.id === focusRoomId || room.id === selectedId;
         return (
           <g key={room.id} onPointerDown={(e) => (e.stopPropagation(), onSelect?.(room.id))} style={{ cursor: onSelect ? 'pointer' : undefined }}>
-            <polygon points={room.polygon.map((p) => `${p.x},${p.y}`).join(' ')} fill={focus ? 'rgb(37 99 235 / 0.12)' : warned.has(room.id) ? 'rgb(220 38 38 / 0.06)' : '#fafafa'} />
+            <polygon points={room.polygon.map((p) => `${p.x},${p.y}`).join(' ')} fill={focus ? 'rgb(37 99 235 / 0.12)' : warned.has(room.id) ? 'rgb(220 38 38 / 0.06)' : showLayout && zoneOf?.get(room.id) ? zoneOf.get(room.id) : '#fafafa'} fillOpacity={!focus && showLayout && zoneOf?.get(room.id) && !warned.has(room.id) ? 0.09 : 1} />
             <text x={c.x} y={c.y - (showLayout ? 0 : 0.3)} textAnchor="middle" fontSize={0.95} fontWeight={600} fill="#374151" style={{ pointerEvents: 'none' }}>
               {room.name}
             </text>
@@ -181,7 +189,9 @@ export function PlanView({ project, result, selectedId, onSelect, showLayout, ed
           {result.ducts.map((d) => {
             const isTrunk = d.type === 'trunk' && d.side === 'supply';
             const base = d.side === 'supply' ? COLORS.supply : COLORS.return;
-            const id = isTrunk ? 'trunk' : d.id;
+            const sysId = d.id.split('/')[0];
+            const trunk = systems.find((x) => x.id === sysId)?.trunk;
+            const id = isTrunk ? `${sysId}/trunk` : d.id;
             return (
               <line
                 key={d.id}
@@ -189,17 +199,17 @@ export function PlanView({ project, result, selectedId, onSelect, showLayout, ed
                 y1={d.start.y}
                 x2={d.end.x}
                 y2={d.end.y}
-                stroke={sel(d.id) || (isTrunk && sel('trunk')) ? COLORS.select : color(d.id, base)}
+                stroke={sel(d.id) || sel(id) ? COLORS.select : color(d.id, base)}
                 strokeOpacity={d.side === 'return' ? 0.7 : 0.85}
                 strokeWidth={Math.max(0.25, (d.shape === 'rect' ? d.widthIn! : d.diameter) / 12)}
                 strokeDasharray={d.side === 'return' ? '0.6 0.4' : undefined}
                 strokeLinecap={d.shape === 'rect' ? 'butt' : 'round'}
-                style={{ cursor: isTrunk && editable ? (layout.trunk.axis === 'x' ? 'ns-resize' : 'ew-resize') : 'pointer' }}
+                style={{ cursor: isTrunk && editable && trunk && result.framing.ductSpace !== 'plenum' ? (trunk.axis === 'x' ? 'ns-resize' : 'ew-resize') : 'pointer' }}
                 onPointerDown={startDrag(id)}
               />
             );
           })}
-          {layout.registers.map((r) => {
+          {systems.flatMap((sys) => sys.registers).map((r) => {
             const s = r.kind === 'supply' ? 1.4 : 1.8;
             const base = r.kind === 'supply' ? COLORS.supply : COLORS.return;
             return (
@@ -209,21 +219,17 @@ export function PlanView({ project, result, selectedId, onSelect, showLayout, ed
               </g>
             );
           })}
-          <g onPointerDown={startDrag('ahu')} style={{ cursor: editable ? 'move' : 'pointer' }}>
-            <rect
-              x={layout.airHandler.position.x - 1.25}
-              y={layout.airHandler.position.y - 1.25}
-              width={2.5}
-              height={2.5}
-              rx={0.2}
-              fill="#111827"
-              stroke={sel('ahu') ? COLORS.select : color('ahu', '#111827')}
-              strokeWidth={0.35}
-            />
-            <text x={layout.airHandler.position.x} y={layout.airHandler.position.y + 0.3} textAnchor="middle" fontSize={0.75} fontWeight={700} fill="#fff" style={{ pointerEvents: 'none' }}>
-              AHU
-            </text>
-          </g>
+          {systems.map((sys) => {
+            const ahu = sys.airHandler;
+            return (
+              <g key={ahu.id} onPointerDown={startDrag(ahu.id)} style={{ cursor: editable ? 'move' : 'pointer' }}>
+                <rect x={ahu.position.x - 1.5} y={ahu.position.y - 1.25} width={3} height={2.5} rx={0.2} fill="#111827" stroke={sel(ahu.id) ? COLORS.select : color(ahu.id, '#111827')} strokeWidth={0.35} />
+                <text x={ahu.position.x} y={ahu.position.y + 0.25} textAnchor="middle" fontSize={0.62} fontWeight={700} fill="#fff" style={{ pointerEvents: 'none' }}>
+                  {sys.name}
+                </text>
+              </g>
+            );
+          })}
         </g>
       )}
     </svg>

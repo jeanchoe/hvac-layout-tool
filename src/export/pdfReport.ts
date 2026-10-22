@@ -71,7 +71,9 @@ export function buildReport(project: Project, results: Record<string, EngineResu
   floors.forEach((floor, fi) => {
   if (fi) doc.addPage();
   const result = results[floor.id];
-  const layout = project.layouts[floor.id];
+  const systems = project.layouts[floor.id] ?? [];
+  const layout = systems.length > 0;
+  const registers = systems.flatMap((x) => x.registers);
   header(`Plan view${multi ? `  ·  ${floor.name}` : ''}  ·  ${date}`);
   const box = { x: PAGE.m, y: PAGE.m + 50, w: 500, h: PAGE.h - PAGE.m * 2 - 80 };
   const rooms = result.rooms;
@@ -144,7 +146,7 @@ export function buildReport(project: Project, results: Record<string, EngineResu
         doc.line(a.x, a.y, c.x, c.y);
       }
       doc.setLineDashPattern([], 0);
-      for (const r of layout.registers) {
+      for (const r of registers) {
         const p = P(r.position);
         const z = (r.kind === 'supply' ? 1.4 : 1.8) * s;
         const c = warned.has(r.id) ? C.danger : r.kind === 'supply' ? C.supply : C.ret;
@@ -157,12 +159,14 @@ export function buildReport(project: Project, results: Record<string, EngineResu
           for (const dy of [-z / 4, 0, z / 4]) doc.line(p.x - z / 3, p.y + dy, p.x + z / 3, p.y + dy);
         }
       }
-      const a = P(layout.airHandler.position);
-      const z = 2.5 * s;
-      color('fill', C.ink);
-      doc.rect(a.x - z / 2, a.y - z / 2, z, z, 'F');
-      font(Math.max(5, Math.min(8, z / 3)), 'bold', [255, 255, 255]);
-      doc.text('AHU', a.x, a.y + 2.5, { align: 'center' });
+      for (const sys of systems) {
+        const a = P(sys.airHandler.position);
+        const z = 2.5 * s;
+        color('fill', C.ink);
+        doc.rect(a.x - z * 0.6, a.y - z / 2, z * 1.2, z, 'F');
+        font(Math.max(5, Math.min(8, z / 3.5)), 'bold', [255, 255, 255]);
+        doc.text(sys.name, a.x, a.y + 2.5, { align: 'center' });
+      }
     }
 
     for (const r of rooms) {
@@ -219,11 +223,11 @@ export function buildReport(project: Project, results: Record<string, EngineResu
   kv('Rooms', String(rooms.length));
   y += 8;
   sectionTitle('Equipment');
-  if (layout) {
-    const ahu = layout.airHandler;
-    kv('Air handler', `${ahu.tons} ton`);
-    kv('Capacity', `${fmtInt(ahu.capacityBtuh)} BTU/h`);
-    kv('Airflow', `${fmtInt(ahu.airflowCfm)} CFM`);
+  for (const sys of systems) {
+    const ahu = sys.airHandler;
+    const zone = result.systems.find((x) => x.id === sys.id);
+    kv(sys.name, `${ahu.tons} ton · ${fmtInt(ahu.capacityBtuh)} BTU/h · ${fmtInt(ahu.airflowCfm)} CFM`);
+    if (systems.length > 1 && zone) kv('  serves', `${zone.roomIds.length} rooms, ${fmtInt(zone.totals.coolingBtuh)} BTU/h`);
   }
   kv('Cooling load (est.)', `${fmtInt(result.totals.coolingBtuh)} BTU/h`);
   kv('Heating load (est.)', `${fmtInt(result.totals.heatingBtuh)} BTU/h`);
@@ -234,8 +238,8 @@ export function buildReport(project: Project, results: Record<string, EngineResu
     y += 8;
     sectionTitle('Distribution');
     const len = (f: (d: (typeof result.ducts)[0]) => boolean) => result.ducts.filter(f).reduce((s, d) => s + d.length, 0);
-    kv('Supply registers', String(layout.registers.filter((r) => r.kind === 'supply').length));
-    kv('Return grilles', String(layout.registers.filter((r) => r.kind === 'return').length));
+    kv('Supply registers', String(registers.filter((r) => r.kind === 'supply').length));
+    kv('Return grilles', String(registers.filter((r) => r.kind === 'return').length));
     kv('Supply trunk', `${len((d) => d.side === 'supply' && d.type === 'trunk').toFixed(0)} ft`);
     kv('Supply branches', `${len((d) => d.side === 'supply' && d.type === 'branch').toFixed(0)} ft`);
     kv('Return ducts', `${len((d) => d.side === 'return').toFixed(0)} ft`);
@@ -264,7 +268,7 @@ export function buildReport(project: Project, results: Record<string, EngineResu
   legend(C.ret, 'Return duct', 'dash');
   legend(C.supply, 'Supply register', 'box');
   legend(C.ret, 'Return grille', 'grille');
-  legend(C.ink, 'Air handler (AHU)', 'ahu');
+  legend(C.ink, 'Main unit (AHU)', 'ahu');
   legend(C.danger, 'Has a warning', 'line');
   legend(C.window, 'Window', 'line');
   if ((project.beams ?? []).some((x) => x.floorId === floor.id)) {
@@ -276,7 +280,7 @@ export function buildReport(project: Project, results: Record<string, EngineResu
 
   // Building-wide figures for the tables that follow.
   const roomsAll = floors.flatMap((f) => results[f.id].rooms);
-  const registersAll = floors.flatMap((f) => project.layouts[f.id]?.registers ?? []);
+  const registersAll = floors.flatMap((f) => (project.layouts[f.id] ?? []).flatMap((x) => x.registers));
   const result = {
     loads: building.loads,
     walls: building.walls,

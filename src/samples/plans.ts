@@ -150,7 +150,7 @@ export function buildSampleProject(plan: SamplePlan): Project {
   rooms = rooms.map((r) => applyRoomDefaults(r, walls, () => `${r.id}-w${n++}`));
   const now = new Date(0).toISOString();
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     id: `sample-${plan.id}`,
     name: plan.name,
     zipCode: plan.zipCode,

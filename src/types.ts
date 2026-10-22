@@ -57,6 +57,8 @@ export interface Floor {
    * above (the floor cavity), otherwise the project's setting.
    */
   ductSpace?: Framing['ductSpace'];
+  /** How many main units serve this floor. Undefined = automatic, from the floor's load. */
+  unitCount?: number;
 }
 
 export interface Room {
@@ -210,7 +212,17 @@ export interface DuctSegment {
   registerId?: string;
 }
 
+/**
+ * One system: a main unit, the zone (rooms) it serves, its registers and grilles. The ducts are
+ * derived. A floor has one or more systems.
+ */
 export interface Layout {
+  /** Stable id, e.g. "u1". */
+  id: string;
+  /** Unit tag shown on drawings, e.g. "AHU-1". */
+  name: string;
+  /** Rooms this unit serves; null = every room on the floor (a single-system floor). */
+  roomIds: string[] | null;
   airHandler: AirHandler;
   trunk: Trunk;
   registers: Register[];
@@ -234,7 +246,8 @@ export interface Warning {
     | 'DUCT_DOES_NOT_FIT'
     | 'REGISTER_ON_JOIST'
     | 'DUCT_CROSSES_MAIN_BEAM'
-    | 'UNIT_OUTSIDE_EQUIPMENT_AREA';
+    | 'UNIT_OUTSIDE_EQUIPMENT_AREA'
+    | 'ROOM_NOT_SERVED';
   severity: Severity;
   message: string;
   componentIds: string[];
@@ -243,7 +256,7 @@ export interface Warning {
 }
 
 export interface Project {
-  schemaVersion: 2;
+  schemaVersion: 3;
   id: string;
   name: string;
   zipCode: string;
@@ -259,8 +272,8 @@ export interface Project {
   beams?: Beam[];
   /** Areas where main units may be placed, per floor (optional; none = anywhere). */
   equipmentAreas?: EquipmentArea[];
-  /** One duct system per floor, keyed by floor id. */
-  layouts: Record<string, Layout>;
+  /** The systems on each floor, keyed by floor id. */
+  layouts: Record<string, Layout[]>;
   createdAt: string;
   updatedAt: string;
 }
