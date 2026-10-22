@@ -1,4 +1,4 @@
-import { designDefaults, type DesignKey, type EngineResult, type RoomLoad } from '../engine';
+import { designDefaults, sortedFloors, type DesignKey, type EngineResult, type RoomLoad } from '../engine';
 import { fmtBtuh, fmtInt, fmtSqFt } from '../lib/format';
 import { setDesignInput } from '../state/layoutActions';
 import { useStore } from '../state/store';
@@ -81,8 +81,9 @@ const GROUPS: { title: string; rows: { key: DesignKey; label: string; suffix: st
 export function BuildingAssumptions({ result }: { result: EngineResult }) {
   const design = useStore((s) => s.project.design) ?? {};
   const defaults = designDefaults(result.climate);
-  const t = result.totals;
-  const tons = result.recommended.tons;
+  const b = result.building;
+  const t = b.totals;
+  const floors = sortedFloors(b.floors).filter((f) => b.byFloor[f.id]?.totals.areaSqFt > 0);
   return (
     <div className="space-y-5">
       <div>
@@ -94,8 +95,12 @@ export function BuildingAssumptions({ result }: { result: EngineResult }) {
       <div className="grid grid-cols-2 gap-3 rounded-md bg-gray-50 p-3">
         <Stat label="Cooling" value={fmtBtuh(t.coolingBtuh)} sub={`${fmtInt(t.sensibleCoolingBtuh)} sensible + ${fmtInt(t.latentCoolingBtuh)} latent`} />
         <Stat label="Heating" value={fmtBtuh(t.heatingBtuh)} />
-        <Stat label="Suggested system" value={`${tons} ton`} sub={`${fmtInt(t.areaSqFt / tons)} sq ft per ton`} />
-        <Stat label="Area" value={fmtSqFt(t.areaSqFt)} />
+        {floors.length > 1 ? (
+          <Stat label="Suggested systems" value={floors.map((f) => `${b.byFloor[f.id].recommended.tons} t`).join(' + ')} sub={floors.map((f) => f.name).join(' + ')} />
+        ) : (
+          <Stat label="Suggested system" value={`${result.recommended.tons} ton`} sub={`${fmtInt(t.areaSqFt / result.recommended.tons)} sq ft per ton`} />
+        )}
+        <Stat label="Area" value={fmtSqFt(t.areaSqFt)} sub={floors.length > 1 ? `${floors.length} floors` : undefined} />
       </div>
       {GROUPS.map((g) => (
         <section key={g.title}>

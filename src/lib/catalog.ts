@@ -2,7 +2,7 @@ import type { BuildingType, SystemType } from '../types';
 
 export const BUILDING_TYPES: { id: BuildingType; label: string; enabled: boolean }[] = [
   { id: 'single-story-residential', label: 'Single-story residential', enabled: true },
-  { id: 'multi-story-residential', label: 'Multi-story residential', enabled: false },
+  { id: 'multi-story-residential', label: 'Multi-story residential', enabled: true },
   { id: 'light-commercial', label: 'Light commercial', enabled: false },
 ];
 

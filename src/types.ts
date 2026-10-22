@@ -35,10 +35,32 @@ export interface WindowSpec {
   height: number;
 }
 
-export interface Room {
+/** One storey. Each has its own plan image, scale and room tracing. */
+export interface Floor {
   id: string;
   name: string;
-  /** Polygon corners in feet. */
+  /** 0 = ground floor, 1 = the floor above, and so on. */
+  level: number;
+  /** Floor-to-floor height (ft): ceiling height plus the floor framing above it. */
+  heightFt: number;
+  background: BackgroundImage | null;
+  /** Pixels of this floor's plan image per foot; null until the user sets the scale. */
+  scalePxPerFt: number | null;
+  scaleLine: ScaleLine | null;
+  /** Where this floor's plan image sits in building coordinates (ft), so floors line up. */
+  offsetFt: Pt;
+  /**
+   * Where this floor's ducts run. Undefined = automatic: between joists when another floor is
+   * above (the floor cavity), otherwise the project's setting.
+   */
+  ductSpace?: Framing['ductSpace'];
+}
+
+export interface Room {
+  id: string;
+  floorId: string;
+  name: string;
+  /** Polygon corners in feet, in building coordinates (shared by all floors). */
   polygon: Pt[];
   ceilingHeight: number;
   floorType: FloorType;
@@ -188,22 +210,20 @@ export interface Warning {
 }
 
 export interface Project {
-  schemaVersion: 1;
+  schemaVersion: 2;
   id: string;
   name: string;
   zipCode: string;
   buildingType: BuildingType;
   systemType: SystemType;
-  /** Pixels of the background image per foot; null until the user sets the scale. */
-  scalePxPerFt: number | null;
-  scaleLine: ScaleLine | null;
-  background: BackgroundImage | null;
+  floors: Floor[];
   rooms: Room[];
   /** Overrides of the load-calculation inputs (optional; older files have none). */
   design?: DesignInputs;
   /** Duct space and framing (optional; defaults to ducts in the attic). */
   framing?: Framing;
-  layout: Layout | null;
+  /** One duct system per floor, keyed by floor id. */
+  layouts: Record<string, Layout>;
   createdAt: string;
   updatedAt: string;
 }

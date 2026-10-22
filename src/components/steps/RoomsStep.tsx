@@ -5,7 +5,8 @@ import { newId } from '../../lib/ids';
 import { fmtSqFt } from '../../lib/format';
 import { applyRoomDefaults } from '../../lib/roomDefaults';
 import { useEngine } from '../../state/engine';
-import { useStore } from '../../state/store';
+import { currentFloor, useStore } from '../../state/store';
+import { FloorTabs } from '../FloorTabs';
 import type { FloorType, Room, Wall } from '../../types';
 import { BuildingAssumptions, LoadBreakdown } from '../LoadPanels';
 import { PlanView } from '../PlanView';
@@ -39,8 +40,10 @@ export function RoomsStep() {
     });
   }, []);
 
+  const floor = useStore((s) => currentFloor(s));
+  const floorRooms = project.rooms.filter((r) => r.floorId === floor.id);
   const showBuilding = selectedId === BUILDING;
-  const room = project.rooms.find((r) => r.id === selectedId) ?? project.rooms[0];
+  const room = floorRooms.find((r) => r.id === selectedId) ?? floorRooms[0];
   useEffect(() => {
     if (!showBuilding && room && room.id !== selectedId) select(room.id);
   }, [room, selectedId, select, showBuilding]);
@@ -54,9 +57,16 @@ export function RoomsStep() {
       coalesce ? { coalesce: `${coalesce}-${room.id}` } : undefined,
     );
 
-  if (!room) return <div className="p-8 text-sm text-gray-500">No rooms yet. Go back and trace some rooms.</div>;
-  const walls = result.walls.filter((w) => w.roomId === room.id);
-  const load = result.loads.find((l) => l.roomId === room.id);
+  if (!room && !showBuilding) {
+    return (
+      <div className="flex h-full flex-col">
+        <FloorTabs />
+        <div className="p-8 text-sm text-gray-500">No rooms on {floor.name} yet. Go back to Trace & scale to draw them.</div>
+      </div>
+    );
+  }
+  const walls = room ? result.walls.filter((w) => w.roomId === room.id) : [];
+  const load = room ? result.loads.find((l) => l.roomId === room.id) : undefined;
 
   const toggleExterior = (w: Wall) =>
     editRoom((r) => {
@@ -66,14 +76,16 @@ export function RoomsStep() {
     });
 
   return (
-    <div className="flex h-full min-h-0 flex-col lg:flex-row">
+    <div className="flex h-full min-h-0 flex-col">
+    <FloorTabs />
+    <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
       <aside className="flex w-full shrink-0 gap-1 overflow-x-auto border-b border-gray-200 p-2 lg:block lg:w-56 lg:overflow-y-auto lg:border-b-0 lg:border-r">
         <button onClick={() => select(BUILDING)} className={`mb-1 block shrink-0 rounded-md border px-3 py-2 text-left text-sm lg:w-full ${showBuilding ? 'border-accent bg-accent-soft font-medium text-accent' : 'border-gray-200 hover:bg-gray-50'}`}>
           <div>Building assumptions</div>
           <div className="text-xs text-gray-500">Temperatures, insulation, air leakage</div>
         </button>
-        {project.rooms.map((r) => (
-          <button key={r.id} onClick={() => select(r.id)} className={`mb-0.5 block shrink-0 rounded-md px-3 py-2 text-left text-sm lg:w-full ${!showBuilding && r.id === room.id ? 'bg-accent-soft font-medium text-accent' : 'hover:bg-gray-50'}`}>
+        {floorRooms.map((r) => (
+          <button key={r.id} onClick={() => select(r.id)} className={`mb-0.5 block shrink-0 rounded-md px-3 py-2 text-left text-sm lg:w-full ${!showBuilding && r.id === room?.id ? 'bg-accent-soft font-medium text-accent' : 'hover:bg-gray-50'}`}>
             <div className="truncate">{r.name}</div>
             <div className="text-xs text-gray-500">
               {Math.round(polygonArea(r.polygon))} ft² · {r.ceilingHeight} ft{r.isBedroom ? ' · bedroom' : ''}
@@ -83,7 +95,7 @@ export function RoomsStep() {
       </aside>
 
       <div className="relative min-h-[55vh] min-w-0 flex-1 bg-white p-4">
-        <PlanView project={project} result={result} selectedId={showBuilding ? null : room.id} focusRoomId={showBuilding ? null : room.id} onSelect={(id) => id && project.rooms.some((r) => r.id === id) && select(id)} onWallClick={toggleExterior} className="h-full w-full" />
+        <PlanView project={project} result={result} selectedId={showBuilding ? null : room.id} focusRoomId={showBuilding ? null : room.id} onSelect={(id) => id && floorRooms.some((r) => r.id === id) && select(id)} onWallClick={toggleExterior} className="h-full w-full" />
         <div className="absolute bottom-4 left-4 rounded-md bg-white/90 px-3 py-2 text-xs text-gray-500 shadow-sm ring-1 ring-gray-200">
           Click a wall of the selected room to toggle exterior. <span className="font-semibold text-gray-800">━</span> exterior <span className="text-gray-400">━</span> interior <span className="text-sky-400">━</span> window · North is up
         </div>
@@ -107,8 +119,8 @@ export function RoomsStep() {
               <Select value={room.floorType} options={FLOOR_TYPES} onChange={(v) => editRoom((r) => void (r.floorType = v))} />
             </Field>
           </div>
-          <button className="-mt-2 text-xs text-accent hover:underline" onClick={() => update((d) => d.rooms.forEach((r) => (r.ceilingHeight = room.ceilingHeight)))}>
-            Use {room.ceilingHeight} ft ceilings in every room
+          <button className="-mt-2 text-xs text-accent hover:underline" onClick={() => update((d) => d.rooms.forEach((r) => r.floorId === floor.id && (r.ceilingHeight = room.ceilingHeight)))}>
+            Use {room.ceilingHeight} ft ceilings in every room on {floor.name}
           </button>
           <label className="flex items-start gap-2 text-sm">
             <input type="checkbox" className="mt-0.5 accent-[#2563eb]" checked={room.isBedroom} onChange={(e) => editRoom((r) => void (r.isBedroom = e.target.checked))} />
@@ -176,7 +188,7 @@ export function RoomsStep() {
         <div className="sticky bottom-0 border-t border-gray-100 bg-white p-4">
           <div className="mb-3 flex justify-between text-xs text-gray-500">
             <span>
-              {result.rooms.length} rooms · {fmtSqFt(result.totals.areaSqFt)}
+              {result.rooms.length} rooms on {floor.name} · {fmtSqFt(result.totals.areaSqFt)}
             </span>
             <span>Climate zone {result.climate.zone}</span>
           </div>
@@ -185,6 +197,7 @@ export function RoomsStep() {
           </Button>
         </div>
       </aside>
+    </div>
     </div>
   );
 }

@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { ACCEPTED_PLAN_TYPES, fileToBackground } from '../../lib/fileIO';
-import { SAMPLE_PLANS } from '../../samples/plans';
+import { SAMPLE_PLANS, sampleLevels } from '../../samples/plans';
 import { renderSamplePlanImage } from '../../samples/renderPlanImage';
-import { useStore } from '../../state/store';
+import { currentFloor, useStore } from '../../state/store';
+import { FloorTabs } from '../FloorTabs';
 import type { BackgroundImage } from '../../types';
 import { Button, Panel } from '../ui';
 
@@ -10,8 +11,9 @@ import { Button, Panel } from '../ui';
 export const BLANK_GRID: Omit<BackgroundImage, 'dataUrl'> & { pxPerFt: number } = { width: 2000, height: 1400, fileName: '', pxPerFt: 20 };
 
 export function UploadStep() {
-  const background = useStore((s) => s.project.background);
-  const hasRooms = useStore((s) => s.project.rooms.length > 0);
+  const floor = useStore((s) => currentFloor(s));
+  const background = floor.background;
+  const hasRooms = useStore((s) => s.project.rooms.some((r) => r.floorId === floor.id));
   const update = useStore((s) => s.update);
   const setStep = useStore((s) => s.setStep);
   const [busy, setBusy] = useState(false);
@@ -20,10 +22,11 @@ export function UploadStep() {
 
   const useBackground = (bg: BackgroundImage) => {
     update((d) => {
-      d.background = bg;
+      const f = d.floors.find((x) => x.id === floor.id)!;
+      f.background = bg;
       // A new image means a new pixel space: the old scale no longer applies.
-      d.scalePxPerFt = null;
-      d.scaleLine = null;
+      f.scalePxPerFt = null;
+      f.scaleLine = null;
     });
     useStore.getState().setTraceTool('scale');
     setStep(2);
@@ -43,6 +46,8 @@ export function UploadStep() {
   };
 
   return (
+    <>
+    <FloorTabs note={`Upload the plan for ${floor.name}.`} />
     <div className="mx-auto grid max-w-5xl gap-6 px-4 py-8 lg:grid-cols-[1fr_300px]">
       <div>
         <label
@@ -86,7 +91,7 @@ export function UploadStep() {
           <p className="mb-3 text-xs text-gray-500">Use a sample floor plan image to try tracing, or draw on a blank grid.</p>
           <div className="space-y-2">
             {SAMPLE_PLANS.map((plan) => (
-              <Button key={plan.id} className="w-full !justify-start" onClick={() => useBackground(renderSamplePlanImage(plan))}>
+              <Button key={plan.id} className="w-full !justify-start" onClick={() => useBackground(renderSamplePlanImage(plan, sampleLevels(plan).includes(floor.level) ? floor.level : 0))}>
                 {plan.name}
               </Button>
             ))}
@@ -95,9 +100,10 @@ export function UploadStep() {
               className="w-full"
               onClick={() => {
                 update((d) => {
-                  d.background = null;
-                  d.scalePxPerFt = BLANK_GRID.pxPerFt;
-                  d.scaleLine = null;
+                  const f = d.floors.find((x) => x.id === floor.id)!;
+                  f.background = null;
+                  f.scalePxPerFt = BLANK_GRID.pxPerFt;
+                  f.scaleLine = null;
                 });
                 useStore.getState().setTraceTool('draw');
                 setStep(2);
@@ -109,5 +115,6 @@ export function UploadStep() {
         </Panel>
       </div>
     </div>
+    </>
   );
 }

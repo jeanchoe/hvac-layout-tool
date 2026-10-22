@@ -43,7 +43,8 @@ export function StartStep() {
 
   const loadSample = (i: number) => {
     const plan = SAMPLE_PLANS[i];
-    replaceProject({ ...buildSampleProject(plan), background: renderSamplePlanImage(plan) }, 3);
+    const project = buildSampleProject(plan);
+    replaceProject({ ...project, floors: project.floors.map((f) => ({ ...f, background: renderSamplePlanImage(plan, f.level) })) }, 3);
   };
 
   return (

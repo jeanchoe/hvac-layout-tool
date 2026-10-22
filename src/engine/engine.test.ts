@@ -1,18 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import { SAMPLE_PLANS, buildSampleProject, sampleLabeledArea } from '../samples/plans';
-import type { DesignInputs, Framing, Project, Room } from '../types';
+import type { DesignInputs, Framing, Layout, Project, Room } from '../types';
 import { climateForZip, defaultConfig, resolveDesign, type EngineConfig } from './config';
 import { branchEfficiency, fitDuct, rectEquivalentDiameter, sizeDuct } from './ductSizing';
 import { acrossJoists, bootHitsJoist, joistGrid } from './framing';
 import { polygonArea } from './geometry';
 import { assignAirflow, equipmentForTons, simplifiedLoadModel, sizeEquipment, type LoadLine } from './load';
 import { deriveWalls } from './walls';
-import { analyzeBuilding, evaluate, generateProjectLayout, rebalanceAirflow, splitRegister, usableRooms } from './index';
+import { analyzeBuilding, defaultFloorId, floorFraming, newFloor, roomExposure, evaluate, evaluateAll, generateAllLayouts, migrateProject, rebalanceAirflow, roomsOnFloor, splitRegister, usableRooms } from './index';
 
-const withLayout = (p: Project): Project => ({ ...p, layout: generateProjectLayout(p) });
+const withLayout = (p: Project): Project => ({ ...p, layouts: generateAllLayouts(p) });
+/** The ground floor's layout, for single-floor tests. */
+const layoutOf = (p: Project): Layout => p.layouts[defaultFloorId(p)];
+const withFloorLayout = (p: Project, layout: Layout | null): Project => ({ ...p, layouts: layout ? { ...p.layouts, [defaultFloorId(p)]: layout } : {} });
 const codes = (p: Project) => evaluate(p).warnings.map((w) => w.code);
 const box = (id: string, x0: number, y0: number, x1: number, y1: number, extra: Partial<Room> = {}): Room => ({
   id,
+  floorId: 'f1',
   name: id,
   polygon: [
     { x: x0, y: y0 },
@@ -211,8 +215,8 @@ describe('duct sizing', () => {
 
 describe.each(SAMPLE_PLANS)('sample plan: $name', (plan) => {
   const project = withLayout(buildSampleProject(plan));
-  const result = evaluate(project);
-  const layout = project.layout!;
+  const results = evaluateAll(project);
+  const floors = project.floors.map((f) => ({ f, layout: project.layouts[f.id], result: results[f.id], rooms: usableRooms(roomsOnFloor(project.rooms, f.id)) }));
 
   it('room areas match the labeled areas within 5%', () => {
     project.rooms.forEach((room, i) => {
@@ -221,38 +225,46 @@ describe.each(SAMPLE_PLANS)('sample plan: $name', (plan) => {
     });
   });
 
-  it('gives every room at least one supply register', () => {
-    for (const room of usableRooms(project.rooms)) {
-      expect(layout.registers.some((r) => r.kind === 'supply' && r.roomId === room.id)).toBe(true);
+  it('gives every floor its own system', () => {
+    for (const { layout, rooms } of floors) if (rooms.length) expect(layout).toBeDefined();
+  });
+
+  it('gives every room at least one supply register on its own floor', () => {
+    for (const { layout, rooms } of floors) {
+      for (const room of rooms) expect(layout.registers.some((r) => r.kind === 'supply' && r.roomId === room.id)).toBe(true);
     }
   });
 
-  it('matches total supply and return airflow to the air handler', () => {
-    const sum = (k: string) => layout.registers.filter((r) => r.kind === k).reduce((s, r) => s + r.targetCfm, 0);
-    expect(sum('supply')).toBe(layout.airHandler.airflowCfm);
-    expect(sum('return')).toBe(layout.airHandler.airflowCfm);
+  it("matches each floor's supply and return airflow to its air handler", () => {
+    for (const { layout } of floors) {
+      const sum = (k: string) => layout.registers.filter((r) => r.kind === k).reduce((s, r) => s + r.targetCfm, 0);
+      expect(sum('supply')).toBe(layout.airHandler.airflowCfm);
+      expect(sum('return')).toBe(layout.airHandler.airflowCfm);
+    }
   });
 
   it('gives every supply register at least the minimum airflow', () => {
-    for (const r of layout.registers.filter((x) => x.kind === 'supply')) expect(r.targetCfm).toBeGreaterThanOrEqual(defaultConfig.minCfmPerSupplyRegister);
+    for (const { layout } of floors) for (const r of layout.registers.filter((x) => x.kind === 'supply')) expect(r.targetCfm).toBeGreaterThanOrEqual(defaultConfig.minCfmPerSupplyRegister);
   });
 
-  it('adds a return for each bedroom plus a central return', () => {
-    const bedrooms = project.rooms.filter((r) => r.isBedroom);
-    expect(bedrooms.length).toBeGreaterThanOrEqual(3);
-    for (const b of bedrooms) expect(layout.registers.some((r) => r.kind === 'return' && r.roomId === b.id)).toBe(true);
-    expect(layout.registers.some((r) => r.id === 'r-central')).toBe(true);
+  it('adds a return for each bedroom plus a central return on each floor', () => {
+    expect(project.rooms.filter((r) => r.isBedroom).length).toBeGreaterThanOrEqual(3);
+    for (const { layout, rooms } of floors) {
+      for (const b of rooms.filter((r) => r.isBedroom)) expect(layout.registers.some((r) => r.kind === 'return' && r.roomId === b.id)).toBe(true);
+      expect(layout.registers.some((r) => r.id === 'r-central')).toBe(true);
+    }
   });
 
-  it('produces a layout with no warnings', () => {
-    expect(result.warnings).toEqual([]);
+  it('produces layouts with no warnings', () => {
+    for (const { result } of floors) expect(result.warnings).toEqual([]);
   });
 
   it('forms a duct tree with every register connected', () => {
-    for (const r of layout.registers) expect(result.ducts.some((d) => d.registerId === r.id)).toBe(true);
-    const trunks = result.ducts.filter((d) => d.type === 'trunk' && d.side === 'supply');
-    expect(trunks.length).toBeGreaterThan(0);
-    for (const d of result.ducts) expect(d.diameter).toBe(sizeDuct(d.cfm));
+    for (const { layout, result } of floors) {
+      for (const r of layout.registers) expect(result.ducts.some((d) => d.registerId === r.id)).toBe(true);
+      expect(result.ducts.some((d) => d.type === 'trunk' && d.side === 'supply')).toBe(true);
+      for (const d of result.ducts) expect(d.diameter).toBe(sizeDuct(d.cfm));
+    }
   });
 
   it('re-evaluates fast enough for live dragging (< 200 ms)', () => {
@@ -262,16 +274,16 @@ describe.each(SAMPLE_PLANS)('sample plan: $name', (plan) => {
   });
 
   it('survives a JSON save/load round trip exactly', () => {
-    const reloaded = JSON.parse(JSON.stringify(project)) as Project;
+    const reloaded = migrateProject(JSON.parse(JSON.stringify(project)));
     expect(reloaded).toEqual(project);
-    expect(evaluate(reloaded)).toEqual(result);
+    expect(evaluateAll(reloaded)).toEqual(results);
   });
 });
 
 describe('validation rules', () => {
   const base = withLayout(buildSampleProject(SAMPLE_PLANS[0]));
-  const L = base.layout!;
-  const editRegisters = (fn: (regs: typeof L.registers) => typeof L.registers): Project => ({ ...base, layout: { ...L, registers: fn(L.registers.map((r) => ({ ...r }))) } });
+  const L = layoutOf(base);
+  const editRegisters = (fn: (regs: typeof L.registers) => typeof L.registers): Project => withFloorLayout(base, { ...L, registers: fn(L.registers.map((r) => ({ ...r }))) });
   const firstSupply = L.registers.find((r) => r.kind === 'supply')!;
   const roomOf = base.rooms.find((r) => r.id === firstSupply.roomId)!;
 
@@ -299,7 +311,7 @@ describe('validation rules', () => {
 
   it('flags a branch longer than the maximum', () => {
     const far = base.rooms.flatMap((r) => r.polygon).reduce((m, p) => Math.max(m, p.y), 0);
-    const p: Project = { ...base, layout: { ...L, trunk: { axis: 'x', offset: far + 30 } } };
+    const p: Project = withFloorLayout(base, { ...L, trunk: { axis: 'x', offset: far + 30 } });
     expect(codes(p)).toContain('BRANCH_TOO_LONG');
   });
 
@@ -326,14 +338,14 @@ describe('validation rules', () => {
   });
 
   it('flags total airflow not matching the air handler, and rebalancing clears it', () => {
-    const p: Project = { ...base, layout: { ...L, airHandler: { ...L.airHandler, ...equipmentForTons(L.airHandler.tons + 1) } } };
+    const p: Project = withFloorLayout(base, { ...L, airHandler: { ...L.airHandler, ...equipmentForTons(L.airHandler.tons + 1) } });
     expect(codes(p)).toContain('AIRFLOW_MISMATCH');
-    const fixed: Project = { ...p, layout: rebalanceAirflow(p) };
+    const fixed: Project = withFloorLayout(p, rebalanceAirflow(p));
     expect(codes(fixed)).not.toContain('AIRFLOW_MISMATCH');
   });
 
   it('flags an air handler outside the building', () => {
-    const p: Project = { ...base, layout: { ...L, airHandler: { ...L.airHandler, position: { x: -50, y: -50 } } } };
+    const p: Project = withFloorLayout(base, { ...L, airHandler: { ...L.airHandler, position: { x: -50, y: -50 } } });
     expect(codes(p)).toContain('AHU_OUTSIDE_BUILDING');
   });
 
@@ -346,7 +358,7 @@ describe('validation rules', () => {
 
 describe('analysis', () => {
   it('sizes the sample ranch to a sensible system', () => {
-    const a = analyzeBuilding(buildSampleProject(SAMPLE_PLANS[0]));
+    const a = evaluate(buildSampleProject(SAMPLE_PLANS[0]));
     expect(a.totals.areaSqFt).toBe(1680);
     // Code-minimum 1,680 sq ft house in zone 4: roughly 600-1,000 sq ft per ton.
     expect(a.recommended.tons).toBeGreaterThanOrEqual(1.5);
@@ -376,7 +388,7 @@ describe.each(SAMPLE_PLANS.flatMap((plan) => (['y', 'x'] as const).map((dir) => 
   const framing = JOISTS(dir);
   const project = withLayout({ ...buildSampleProject(plan), framing });
   const result = evaluate(project);
-  const layout = project.layout!;
+  const layout = layoutOf(project);
   const across = (p: { x: number; y: number }) => acrossJoists(p, framing);
 
   it('runs the trunk across the joists', () => {
@@ -410,10 +422,10 @@ describe('framing rules', () => {
   });
 
   it('flags a register that lands on a joist', () => {
-    const reg = base.layout!.registers.find((r) => r.kind === 'supply')!;
+    const reg = layoutOf(base).registers.find((r) => r.kind === 'supply')!;
     const grid = evaluate(base).grid!;
     const onJoist = { x: grid.origin + Math.round((reg.position.x - grid.origin) / grid.spacingFt) * grid.spacingFt, y: reg.position.y };
-    const p: Project = { ...base, layout: { ...base.layout!, registers: base.layout!.registers.map((r) => (r.id === reg.id ? { ...r, position: onJoist } : r)) } };
+    const p: Project = withFloorLayout(base, { ...layoutOf(base), registers: layoutOf(base).registers.map((r) => (r.id === reg.id ? { ...r, position: onJoist } : r)) });
     expect(evaluate(p).warnings.find((x) => x.code === 'REGISTER_ON_JOIST')?.componentIds).toEqual([reg.id]);
   });
 
@@ -431,7 +443,7 @@ describe('joist bays: every common framing generates a clean layout', () => {
   );
   it.each(cases)('$plan.id, joists $framing.joistDirection, $framing.spacingIn" o.c., $framing.depthIn" deep', ({ plan, framing }) => {
     const project = withLayout({ ...buildSampleProject(plan), framing });
-    expect(evaluate(project).warnings.map((w) => w.message)).toEqual([]);
+    expect(Object.values(evaluateAll(project)).flatMap((r) => r.warnings.map((w) => `${r.floorId}: ${w.message}`))).toEqual([]);
   });
 });
 
@@ -439,8 +451,8 @@ describe('splitting an oversized register', () => {
   // The setup from user testing: 12" o.c. joists, 2x12, which leaves a 10.5" wide bay.
   const framing = { ...JOISTS('x'), spacingIn: 12, depthIn: 11.25 };
   const base = withLayout({ ...buildSampleProject(SAMPLE_PLANS[0]), framing });
-  const reg = base.layout!.registers.find((r) => r.kind === 'supply' && evaluate(base).branchLength[r.id] > 4)!;
-  const tooBig: Project = { ...base, layout: { ...base.layout!, registers: base.layout!.registers.map((r) => (r.id === reg.id ? { ...r, targetCfm: 600 } : r)) } };
+  const reg = layoutOf(base).registers.find((r) => r.kind === 'supply' && evaluate(base).branchLength[r.id] > 4)!;
+  const tooBig: Project = withFloorLayout(base, { ...layoutOf(base), registers: layoutOf(base).registers.map((r) => (r.id === reg.id ? { ...r, targetCfm: 600 } : r)) });
 
   it('offers a split when a branch cannot fit its bay', () => {
     const w = evaluate(tooBig).warnings.find((x) => x.code === 'DUCT_DOES_NOT_FIT');
@@ -450,12 +462,79 @@ describe('splitting an oversized register', () => {
 
   it('clears the warning once split, keeping the airflow', () => {
     const fix = evaluate(tooBig).warnings.find((x) => x.code === 'DUCT_DOES_NOT_FIT')!.fix!;
-    const split: Project = { ...tooBig, layout: splitRegister(tooBig, fix.registerId, fix.parts) };
-    const pieces = split.layout!.registers.filter((r) => r.id === reg.id || r.id.startsWith(`${reg.id}-`));
+    const split: Project = withFloorLayout(tooBig, splitRegister(tooBig, fix.registerId, fix.parts));
+    const pieces = layoutOf(split).registers.filter((r) => r.id === reg.id || r.id.startsWith(`${reg.id}-`));
     expect(pieces).toHaveLength(fix.parts);
     expect(pieces.reduce((s, r) => s + r.targetCfm, 0)).toBe(600);
-    expect(new Set(split.layout!.registers.map((r) => r.id)).size).toBe(split.layout!.registers.length);
+    expect(new Set(layoutOf(split).registers.map((r) => r.id)).size).toBe(layoutOf(split).registers.length);
     // Only the system total is off (we forced 600 CFM by hand): nothing overlaps or fails to fit.
     expect(evaluate(split).warnings.map((x) => x.code)).toEqual(['AIRFLOW_MISMATCH']);
+  });
+});
+
+describe('multiple floors', () => {
+  const plan = SAMPLE_PLANS.find((p) => p.id === 'two-story')!;
+  const project = buildSampleProject(plan);
+  const byName = (name: string) => project.rooms.find((r) => r.name === name)!;
+  const exposure = roomExposure(project.rooms, project.floors);
+
+  it('upgrades a v1 (single-floor) project file', () => {
+    const v1 = { schemaVersion: 1, id: 'p', name: 'Old', zipCode: '27601', buildingType: 'single-story-residential', systemType: 'forced-air-ducted', scalePxPerFt: 20, scaleLine: null, background: null, rooms: [{ ...box('a', 0, 0, 10, 10), floorId: undefined }], layout: null, createdAt: '', updatedAt: '' };
+    const v2 = migrateProject(v1);
+    expect(v2.schemaVersion).toBe(2);
+    expect(v2.floors).toHaveLength(1);
+    expect(v2.floors[0]).toMatchObject({ level: 0, scalePxPerFt: 20 });
+    expect(v2.rooms[0].floorId).toBe(v2.floors[0].id);
+    expect(v2.layouts).toEqual({});
+    expect('layout' in v2 || 'scalePxPerFt' in v2).toBe(false);
+  });
+
+  it('works out which ceilings and floors are covered by rooms above and below', () => {
+    expect(exposure.get(byName('Living Room').id)).toMatchObject({ level: 0, ceiling: 0, floor: 1 });
+    expect(exposure.get(byName('Family Room').id)).toMatchObject({ level: 0, ceiling: 1 }); // one-storey wing
+    expect(exposure.get(byName('Bedroom 3').id)).toMatchObject({ level: 1, ceiling: 1, floor: 0 });
+  });
+
+  it('measures partial cover', () => {
+    const rooms = [box('down', 0, 0, 20, 10), { ...box('up', 0, 0, 10, 10), floorId: 'f2' }];
+    const e = roomExposure(rooms, [newFloor('f1', 0), newFloor('f2', 1)]);
+    expect(e.get('down')!.ceiling).toBeCloseTo(0.5, 1);
+    expect(e.get('up')!.floor).toBe(0);
+  });
+
+  it('only counts ceiling and ground losses where they apply', () => {
+    const loads = analyzeBuilding(project).loads;
+    const line = (name: string, list: 'cooling' | 'heating', key: string) => loads.find((l) => l.roomId === byName(name).id)![list].find((x) => x.key === key)!.btuh;
+    expect(line('Living Room', 'cooling', 'ceiling')).toBe(0); // bedroom above
+    expect(line('Family Room', 'cooling', 'ceiling')).toBeGreaterThan(0);
+    expect(line('Bedroom 3', 'heating', 'floor')).toBe(0); // conditioned room below
+    expect(line('Living Room', 'heating', 'floor')).toBeGreaterThan(0); // slab edge
+  });
+
+  it('never treats rooms on different floors as sharing a wall', () => {
+    const walls = deriveWalls(project.rooms);
+    const bed3 = walls.filter((w) => w.roomId === byName('Bedroom 3').id);
+    expect(bed3.find((w) => w.facing === 'N')!.exterior).toBe(true);
+    expect(bed3.every((w) => !w.sharedWithRoomId || project.rooms.find((r) => r.id === w.sharedWithRoomId)!.floorId === 'f2')).toBe(true);
+  });
+
+  it('runs lower-floor ducts in the floor cavity and top-floor ducts in the attic by default', () => {
+    expect(floorFraming(project, 'f1').ductSpace).toBe('joist-bays');
+    expect(floorFraming(project, 'f2').ductSpace).toBe('attic');
+    const overridden = { ...project, floors: project.floors.map((f) => (f.id === 'f1' ? { ...f, ductSpace: 'attic' as const } : f)) };
+    expect(floorFraming(overridden, 'f1').ductSpace).toBe('attic');
+    const all = evaluateAll({ ...project, layouts: generateAllLayouts(project) });
+    expect(all.f1.grid).not.toBeNull();
+    expect(all.f2.grid).toBeNull();
+  });
+
+  it('sizes one system per floor', () => {
+    const all = evaluateAll({ ...project, layouts: generateAllLayouts(project) });
+    expect(Object.keys(all).sort()).toEqual(['f1', 'f2']);
+    for (const r of Object.values(all)) {
+      expect(r.recommended.tons).toBeGreaterThanOrEqual(1.5);
+      expect(r.rooms.every((room) => room.floorId === r.floorId)).toBe(true);
+    }
+    expect(all.f1.building.totals.areaSqFt).toBe(2528);
   });
 });

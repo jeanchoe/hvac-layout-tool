@@ -2,9 +2,10 @@ import { useEffect, useState } from 'react';
 import { branchEfficiency, defaultConfig, type EngineResult } from '../../engine';
 import { centroid } from '../../engine/geometry';
 import { ductSize, fmtBtuh, fmtCfm, fmtFt, fmtInt, fmtSqFt } from '../../lib/format';
-import { lastEvalMs, useEngine } from '../../state/engine';
-import { addRegister, deleteRegister, draggableKind, rebalance, regenerateLayout, setAirHandlerTons, setFraming, setRegisterCfm, splitRegister } from '../../state/layoutActions';
-import { useStore } from '../../state/store';
+import { engineResults, lastEvalMs, useEngine } from '../../state/engine';
+import { addRegister, deleteRegister, draggableKind, generateMissingLayouts, rebalance, regenerateLayout, setAirHandlerTons, setFraming, setRegisterCfm, splitRegister } from '../../state/layoutActions';
+import { currentFloor, useStore } from '../../state/store';
+import { FloorTabs } from '../FloorTabs';
 import type { Framing, Project } from '../../types';
 import { PlanView } from '../PlanView';
 import { Scene3D, type ViewRequest, type WallMode } from '../Scene3D';
@@ -16,13 +17,18 @@ export function LayoutStep() {
   const select = useStore((s) => s.select);
   const setStep = useStore((s) => s.setStep);
   const result = useEngine();
+  const floor = useStore((s) => currentFloor(s));
+  const layout = project.layouts[floor.id];
+  const multiFloor = project.floors.length > 1;
+  const [floorView, setFloorView] = useState<'this' | 'all'>('this');
   const [mode, setMode] = useState<'3d' | 'plan'>('3d');
   const [wallMode, setWallMode] = useState<WallMode>('cutaway');
   const [showLabels, setShowLabels] = useState(true);
   const [viewRequest, setViewRequest] = useState<ViewRequest>({ kind: 'reset', nonce: 0 });
 
+  // Every floor with rooms gets a starting layout the first time this step opens.
   useEffect(() => {
-    if (!useStore.getState().project.layout) regenerateLayout(false);
+    generateMissingLayouts();
   }, []);
 
   useEffect(() => {
@@ -36,22 +42,30 @@ export function LayoutStep() {
     return () => window.removeEventListener('keydown', onKey);
   }, [select]);
 
-  if (!project.layout) {
+  if (!layout) {
+    const hasRooms = project.rooms.some((r) => r.floorId === floor.id);
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-gray-500">
-        No layout yet.
-        <Button variant="primary" onClick={() => regenerateLayout(false)}>
-          Generate starting layout
-        </Button>
+      <div className="flex h-full flex-col">
+        <FloorTabs />
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 text-sm text-gray-500">
+          {hasRooms ? `No layout for ${floor.name} yet.` : `${floor.name} has no rooms yet. Trace them first.`}
+          {hasRooms && (
+            <Button variant="primary" onClick={() => regenerateLayout(false)}>
+              Generate starting layout
+            </Button>
+          )}
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col lg:flex-row">
+    <div className="flex h-full min-h-0 flex-col">
+    <FloorTabs note={multiFloor ? `Each floor has its own system. Editing ${floor.name}.` : undefined} />
+    <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
       <div className="relative min-h-[65vh] min-w-0 flex-1">
         {mode === '3d' ? (
-          <Scene3D project={project} result={result} selectedId={selectedId} wallMode={wallMode} showLabels={showLabels} viewRequest={viewRequest} />
+          <Scene3D project={project} results={engineResults(project)} floorId={floor.id} floorView={multiFloor ? floorView : 'this'} selectedId={selectedId} wallMode={wallMode} showLabels={showLabels} viewRequest={viewRequest} />
         ) : (
           <div className="h-full w-full p-6">
             <PlanView project={project} result={result} selectedId={selectedId} onSelect={select} showLayout editable className="h-full w-full" />
@@ -76,6 +90,15 @@ export function LayoutStep() {
           </select>
           {mode === '3d' && (
             <>
+              {multiFloor && (
+                <>
+                  <span className="mx-1 h-5 w-px bg-gray-200" />
+                  <select aria-label="Floors shown" className="rounded-md bg-transparent px-1 py-1 text-xs text-gray-700" value={floorView} onChange={(e) => setFloorView(e.target.value as 'this' | 'all')}>
+                    <option value="this">Show: {floor.name} only</option>
+                    <option value="all">Show: all floors</option>
+                  </select>
+                </>
+              )}
               <span className="mx-1 h-5 w-px bg-gray-200" />
               <select className="rounded-md bg-transparent px-1 py-1 text-xs text-gray-700" value={wallMode} onChange={(e) => setWallMode(e.target.value as WallMode)}>
                 <option value="cutaway">Walls: cutaway</option>
@@ -125,6 +148,7 @@ export function LayoutStep() {
         </div>
       </aside>
     </div>
+    </div>
   );
 }
 
@@ -167,7 +191,7 @@ function Section({ title, children, actions }: { title: string; children: React.
 }
 
 function Properties({ project, result, selectedId }: { project: Project; result: EngineResult; selectedId: string | null }) {
-  const layout = project.layout!;
+  const layout = project.layouts[result.floorId];
   const select = useStore((s) => s.select);
   const ahu = layout.airHandler;
   const supplyTotal = layout.registers.filter((r) => r.kind === 'supply').reduce((s, r) => s + r.targetCfm, 0);
@@ -395,12 +419,14 @@ const DEPTHS: { value: number; label: string }[] = [
 /** Where ducts run, and the joists they must fit between. */
 function FramingPanel({ framing }: { framing: Framing }) {
   const joists = framing.ductSpace === 'joist-bays';
+  const floor = useStore((s) => currentFloor(s));
+  const multi = useStore((s) => s.project.floors.length > 1);
   const field = 'rounded-md border border-gray-300 bg-white px-2 py-1 text-sm';
   return (
     <div className="mt-4 border-t border-gray-100 pt-4">
       <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Duct space & framing</h4>
       <div className="flex items-center justify-between gap-3 py-1 text-sm">
-        <label htmlFor="duct-space" className="text-gray-500">Ducts run</label>
+        <label htmlFor="duct-space" className="text-gray-500">Ducts on {multi ? floor.name : 'this floor'} run</label>
         <select id="duct-space" className={field} value={framing.ductSpace} onChange={(e) => setFraming({ ductSpace: e.target.value as Framing['ductSpace'] })}>
           <option value="attic">In the attic, over the framing</option>
           <option value="joist-bays">Between joists</option>
@@ -440,7 +466,7 @@ function FramingPanel({ framing }: { framing: Framing }) {
             <NumberInput className="w-24" value={framing.soffitDepthIn} min={4} max={36} step={1} suffix="in" onChange={(v) => setFraming({ soffitDepthIn: v })} />
           </div>
           <p className="mt-2 text-xs text-gray-500">
-            The trunk crosses the joists in a dropped soffit. Each branch runs along the joists inside one bay and turns rectangular when a round duct is too deep.
+            {multi && 'Joist sizes apply to every floor. '}The trunk crosses the joists in a dropped soffit. Each branch runs along the joists inside one bay and turns rectangular when a round duct is too deep.
           </p>
         </>
       ) : (

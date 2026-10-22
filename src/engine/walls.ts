@@ -30,7 +30,7 @@ function sharedLength(a: Room['polygon'][0], b: Room['polygon'][0], c: Room['pol
   return Math.max(0, hi - lo);
 }
 
-/** One wall per room edge. An edge mostly overlapped by another room's edge is interior. */
+/** One wall per room edge. An edge mostly overlapped by other rooms on the same floor is interior. */
 export function deriveWalls(rooms: Room[]): Wall[] {
   const walls: Wall[] = [];
   for (const room of rooms) {
@@ -44,7 +44,7 @@ export function deriveWalls(rooms: Room[]): Wall[] {
       let bestShared = 0;
       let totalShared = 0;
       for (const other of rooms) {
-        if (other.id === room.id || other.polygon.length < 3) continue;
+        if (other.id === room.id || other.floorId !== room.floorId || other.polygon.length < 3) continue;
         let shared = 0;
         other.polygon.forEach((c, j) => {
           shared += sharedLength(start, end, c, other.polygon[(j + 1) % other.polygon.length]);

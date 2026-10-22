@@ -20,8 +20,9 @@ No backend. Deploy `dist/` to any static host.
 
 ## The six steps
 
-1. **Start**: project name, ZIP (climate zone lookup), building and system type. Only
-   single-story residential + forced-air ducted are enabled; the rest show "coming soon".
+1. **Start**: project name, ZIP (climate zone lookup), building and system type.
+   Single- and multi-story residential with forced-air ducted systems are enabled; the
+   rest show "coming soon".
    You can also open a saved project or load one of three pre-traced sample houses.
 2. **Upload**: PNG, JPG or PDF (first page via pdf.js). Sample plan images and a blank
    grid are available if you don't have a plan.
@@ -45,6 +46,30 @@ Undo/redo (Ctrl+Z / Ctrl+Shift+Z) covers every edit; a drag is one undo step and
 coalesced. Save writes a `.hvac.json` file; Open restores it exactly. The last session is
 also autosaved in the browser.
 
+## Multiple floors
+
+Multi-story projects get a floor bar on every per-floor step (Upload, Trace, Room details,
+Layout): switch floors, add one, or rename it, set its floor-to-floor height or delete it.
+
+- **Each floor has its own plan image, scale and rooms.** Rooms are stored in one shared
+  building coordinate system. When tracing an upper floor, the floor below shows as an
+  orange dashed outline, and **Align to Floor N** slides it until the plans line up.
+- **Loads know what is stacked.** A room only loses heat through the part of its ceiling with
+  no room above it (open to the attic), and only through the part of its floor with no room
+  below (ground, or a garage/outdoors on upper floors). A one-storey wing keeps its attic
+  ceiling; a first-floor room under a bedroom doesn't. Walls are only shared between rooms
+  on the same floor.
+- **One system per floor.** Each floor is sized and laid out on its own, the usual setup
+  for two-storey homes. Lower floors default to ducts in the floor cavity (between joists),
+  and the top floor to the attic; each floor can be switched.
+- **Views:** 3D can show just the floor being edited or all floors, with the others faded
+  and not clickable. The PDF has one plan page per floor, and the room table is grouped by
+  floor.
+- Projects saved before multi-story support (schema v1) are upgraded automatically on open.
+
+Not yet modelled: a single system serving several floors (risers and shafts), stairs,
+and floors with different joist sizes.
+
 ## Code layout
 
 ```
@@ -52,6 +77,7 @@ src/
   engine/            Pure TypeScript, no UI imports: building in, layout + warnings out
     config.ts          loads src/config/*.json (all factors live there, not in code)
     walls.ts           walls from room polygons: shared vs exterior, facing N/E/S/W
+    floors.ts          floor order and heights, stacked-room exposure, v1 file upgrade
     load.ts            LoadModel interface + simplified estimate (swap for Manual J later)
     ductSizing.ts      round-duct lookup at a fixed friction rate
     layout.ts          starting-layout heuristics + scored nearby variations

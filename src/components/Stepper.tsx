@@ -5,7 +5,7 @@ import { STEPS, useStore, type StepIndex } from '../state/store';
 export function stepBlocker(step: StepIndex, s: ReturnType<typeof useStore.getState>): string | null {
   const p = s.project;
   if (step >= 3 && usableRooms(p.rooms).length === 0) return 'Trace at least one room first.';
-  if (step >= 5 && !p.layout) return 'Generate a layout first.';
+  if (step >= 5 && Object.keys(p.layouts).length === 0) return 'Generate a layout first.';
   return null;
 }
 

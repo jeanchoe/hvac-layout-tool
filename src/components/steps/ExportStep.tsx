@@ -2,26 +2,29 @@ import { useEffect, useState } from 'react';
 import { buildReport } from '../../export/pdfReport';
 import { fmtBtuh, fmtCfm, fmtSqFt } from '../../lib/format';
 import { downloadBlob, safeFileName, saveProjectFile } from '../../lib/fileIO';
-import { useEngine } from '../../state/engine';
+import { sortedFloors } from '../../engine';
+import { engineResults } from '../../state/engine';
 import { useStore } from '../../state/store';
 import { Button, EstimateBadge, Stat } from '../ui';
 
 export function ExportStep() {
   const project = useStore((s) => s.project);
   const setStep = useStore((s) => s.setStep);
-  const result = useEngine();
+  const results = engineResults(project);
+  const floors = sortedFloors(project.floors).filter((f) => project.layouts[f.id]);
+  const building = Object.values(results)[0].building;
+  const warningCount = Object.values(results).reduce((n, r) => n + r.warnings.length, 0);
   const [pdf, setPdf] = useState<{ url: string; blob: Blob } | null>(null);
 
   useEffect(() => {
-    const blob = buildReport(project, result).output('blob');
+    const blob = buildReport(project, results).output('blob');
     const url = URL.createObjectURL(blob);
     setPdf({ url, blob });
     return () => URL.revokeObjectURL(url);
-  }, [project, result]);
+  }, [project, results]);
   const url = pdf?.url;
 
   const fileName = `${safeFileName(project.name)}-hvac-report.pdf`;
-  const layout = project.layout;
 
   return (
     <div className="flex h-full min-h-0 flex-col lg:flex-row">
@@ -35,14 +38,18 @@ export function ExportStep() {
         </div>
         <EstimateBadge />
         <div className="grid grid-cols-2 gap-3">
-          <Stat label="Area" value={fmtSqFt(result.totals.areaSqFt)} />
-          <Stat label="System" value={layout ? `${layout.airHandler.tons} ton` : '—'} sub={layout ? fmtCfm(layout.airHandler.airflowCfm) : undefined} />
-          <Stat label="Cooling" value={fmtBtuh(result.totals.coolingBtuh)} />
-          <Stat label="Warnings" value={result.warnings.length} />
+          <Stat label="Area" value={fmtSqFt(building.totals.areaSqFt)} sub={floors.length > 1 ? `${floors.length} floors` : undefined} />
+          <Stat
+            label={floors.length > 1 ? 'Systems' : 'System'}
+            value={floors.length ? floors.map((f) => `${project.layouts[f.id].airHandler.tons} t`).join(' + ') : '—'}
+            sub={floors.length ? fmtCfm(floors.reduce((s, f) => s + project.layouts[f.id].airHandler.airflowCfm, 0)) : undefined}
+          />
+          <Stat label="Cooling" value={fmtBtuh(building.totals.coolingBtuh)} />
+          <Stat label="Warnings" value={warningCount} />
         </div>
-        {result.warnings.length > 0 && (
+        {warningCount > 0 && (
           <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-900">
-            The layout still has {result.warnings.length} warning{result.warnings.length > 1 ? 's' : ''}. They are listed in the report.{' '}
+            The layout still has {warningCount} warning{warningCount > 1 ? 's' : ''}. They are listed in the report.{' '}
             <button className="underline" onClick={() => setStep(4)}>
               Back to layout
             </button>

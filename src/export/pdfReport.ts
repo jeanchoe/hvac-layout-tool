@@ -1,5 +1,5 @@
 import { jsPDF } from 'jspdf';
-import type { DesignKey, EngineResult, LoadLine } from '../engine';
+import { sortedFloors, type DesignKey, type EngineResult, type LoadLine } from '../engine';
 import { bbox, centroid, lerp } from '../engine/geometry';
 import { BUILDING_TYPES, ESTIMATE_LABEL, SYSTEM_TYPES } from '../lib/catalog';
 import { ductSize, fmtInt } from '../lib/format';
@@ -20,9 +20,12 @@ const C = {
 
 const PAGE = { w: 792, h: 612, m: 36 };
 
-export function buildReport(project: Project, result: EngineResult): jsPDF {
+/** The report for the whole building: one plan page per floor, then building-wide tables. */
+export function buildReport(project: Project, results: Record<string, EngineResult>): jsPDF {
   const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'letter' });
-  const layout = project.layout;
+  const floors = sortedFloors(project.floors).filter((f) => results[f.id]);
+  const multi = floors.length > 1;
+  const building = results[floors[0].id].building;
   const date = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
 
   const color = (kind: 'draw' | 'fill' | 'text', c: RGB) => (kind === 'draw' ? doc.setDrawColor(...c) : kind === 'fill' ? doc.setFillColor(...c) : doc.setTextColor(...c));
@@ -61,8 +64,13 @@ export function buildReport(project: Project, result: EngineResult): jsPDF {
     doc.line(PAGE.m, PAGE.m + 36, PAGE.w - PAGE.m, PAGE.m + 36);
   };
 
-  // ---------- Page 1: plan view ----------
-  header(`Plan view  ·  ${date}`);
+  // ---------- One plan page per floor ----------
+  let y = 0;
+  floors.forEach((floor, fi) => {
+  if (fi) doc.addPage();
+  const result = results[floor.id];
+  const layout = project.layouts[floor.id];
+  header(`Plan view${multi ? `  ·  ${floor.name}` : ''}  ·  ${date}`);
   const box = { x: PAGE.m, y: PAGE.m + 50, w: 500, h: PAGE.h - PAGE.m * 2 - 80 };
   const rooms = result.rooms;
   if (rooms.length) {
@@ -159,7 +167,7 @@ export function buildReport(project: Project, result: EngineResult): jsPDF {
   }
 
   // Side column: project + equipment summary + legend
-  let y = box.y + 4;
+  y = box.y + 4;
   const col = 560;
   const kv = (k: string, v: string) => {
     font(8, 'normal', C.muted);
@@ -178,7 +186,8 @@ export function buildReport(project: Project, result: EngineResult): jsPDF {
   kv('Climate zone', `${result.climate.zone} (${result.climate.label})`);
   kv('Building', BUILDING_TYPES.find((t) => t.id === project.buildingType)?.label ?? '');
   kv('System', SYSTEM_TYPES.find((t) => t.id === project.systemType)?.label ?? '');
-  kv('Conditioned area', `${fmtInt(result.totals.areaSqFt)} sq ft`);
+  if (multi) kv('Floor', `${floor.name} (${floor.level + 1} of ${floors.length})`);
+  kv(multi ? 'Area, this floor' : 'Conditioned area', `${fmtInt(result.totals.areaSqFt)} sq ft`);
   kv('Rooms', String(rooms.length));
   y += 8;
   sectionTitle('Equipment');
@@ -230,6 +239,22 @@ export function buildReport(project: Project, result: EngineResult): jsPDF {
   legend(C.ink, 'Air handler (AHU)', 'ahu');
   legend(C.danger, 'Has a warning', 'line');
   legend(C.window, 'Window', 'line');
+  });
+
+  // Building-wide figures for the tables that follow.
+  const roomsAll = floors.flatMap((f) => results[f.id].rooms);
+  const registersAll = floors.flatMap((f) => project.layouts[f.id]?.registers ?? []);
+  const result = {
+    loads: building.loads,
+    walls: building.walls,
+    totals: building.totals,
+    design: building.design,
+    loadModelName: building.loadModelName,
+    airflow: Object.assign({}, ...floors.map((f) => results[f.id].airflow)) as EngineResult['airflow'],
+    ducts: floors.flatMap((f) => results[f.id].ducts),
+    warnings: floors.flatMap((f) => results[f.id].warnings.map((w) => (multi ? { ...w, message: `${f.name}: ${w.message}` } : w))),
+  };
+  const rooms = roomsAll;
 
   // ---------- Page 2+: room table ----------
   doc.addPage();
@@ -268,7 +293,14 @@ export function buildReport(project: Project, result: EngineResult): jsPDF {
   };
   const head = () => drawRow(cols.map((c) => c.h), { head: true });
   head();
+  let floorShown = '';
   for (const r of rooms) {
+    if (multi && r.floorId !== floorShown) {
+      floorShown = r.floorId;
+      font(8.5, 'bold', C.accent);
+      doc.text(floors.find((f) => f.id === r.floorId)!.name, PAGE.m + 4, y + 2);
+      y += 15;
+    }
     if (y > PAGE.h - PAGE.m - 40) {
       doc.addPage();
       header(`Room-by-room estimate (continued)  ·  ${date}`);
@@ -279,7 +311,7 @@ export function buildReport(project: Project, result: EngineResult): jsPDF {
     const ext = result.walls.filter((w) => w.roomId === r.id && w.exterior).reduce((s, w) => s + w.length, 0);
     const win = r.windows.reduce((s, w) => s + w.count * w.width * w.height, 0);
     const air = result.airflow[r.id];
-    const regs = layout?.registers.filter((x) => x.roomId === r.id) ?? [];
+    const regs = registersAll.filter((x) => x.roomId === r.id);
     const low = !!air && air.delivered < air.required * 0.9;
     drawRow(
       [
@@ -310,8 +342,8 @@ export function buildReport(project: Project, result: EngineResult): jsPDF {
       fmtInt(result.totals.latentCoolingBtuh),
       fmtInt(result.totals.heatingBtuh),
       fmtInt(result.loads.reduce((s, l) => s + l.requiredCfm, 0)),
-      layout ? fmtInt(totalDelivered) : '—',
-      layout ? `${layout.registers.filter((x) => x.kind === 'supply').length} / ${layout.registers.filter((x) => x.kind === 'return').length}` : '—',
+      registersAll.length ? fmtInt(totalDelivered) : '—',
+      registersAll.length ? `${registersAll.filter((x) => x.kind === 'supply').length} / ${registersAll.filter((x) => x.kind === 'return').length}` : '—',
     ],
     { bold: true },
   );

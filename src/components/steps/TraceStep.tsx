@@ -2,7 +2,9 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { centroid, dist, polygonArea } from '../../engine/geometry';
 import { newId } from '../../lib/ids';
 import { fmtSqFt, parseFeet } from '../../lib/format';
-import { useStore, type TraceTool } from '../../state/store';
+import { sortedFloors } from '../../engine';
+import { currentFloor, useStore, type TraceTool } from '../../state/store';
+import { FloorTabs } from '../FloorTabs';
 import type { Pt, Room } from '../../types';
 import { Button, Kbd, inputClass } from '../ui';
 import { BLANK_GRID } from './UploadStep';
@@ -16,12 +18,13 @@ interface View {
 type Drag =
   | { kind: 'pending'; sx: number; sy: number; vx: number; vy: number; panning: boolean }
   | { kind: 'vertex'; roomId: string; index: number; moved: boolean }
-  | { kind: 'room'; roomId: string; start: Pt; orig: Pt[]; moved: boolean };
+  | { kind: 'room'; roomId: string; start: Pt; orig: Pt[]; moved: boolean }
+  | { kind: 'align'; start: Pt; offset: Pt; rooms: Map<string, Pt[]>; moved: boolean };
 
 const SNAP_PX = 10;
 
-export function newRoom(name: string, polygon: Pt[]): Room {
-  return { id: newId('r'), name, polygon, ceilingHeight: 8, floorType: 'slab', isBedroom: false, exteriorOverrides: {}, windows: [], defaultsApplied: false };
+export function newRoom(name: string, polygon: Pt[], floorId: string): Room {
+  return { id: newId('r'), floorId, name, polygon, ceilingHeight: 8, floorType: 'slab', isBedroom: false, exteriorOverrides: {}, windows: [], defaultsApplied: false };
 }
 
 export function TraceStep() {
@@ -34,10 +37,17 @@ export function TraceStep() {
   const select = useStore((s) => s.select);
   const setStep = useStore((s) => s.setStep);
 
-  const scale = project.scalePxPerFt;
-  const bg = project.background;
+  const floor = useStore((s) => currentFloor(s));
+  const rooms = project.rooms.filter((r) => r.floorId === floor.id);
+  const below = sortedFloors(project.floors).find((f) => f.level === floor.level - 1);
+  const belowRooms = below ? project.rooms.filter((r) => r.floorId === below.id) : [];
+  const scale = floor.scalePxPerFt;
+  const bg = floor.background;
+  const off = floor.offsetFt;
+  /** Edits this floor inside an update. */
+  const floorIn = (d: { floors: typeof project.floors }) => d.floors.find((f) => f.id === floor.id)!;
   const size = bg ? { w: bg.width, h: bg.height } : { w: BLANK_GRID.width, h: BLANK_GRID.height };
-  const effectiveTool: TraceTool = !scale && tool === 'draw' ? 'scale' : tool;
+  const effectiveTool: TraceTool = !scale && (tool === 'draw' || tool === 'align') ? 'scale' : tool === 'align' && !below ? 'select' : tool;
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const [view, setView] = useState<View>({ x: 0, y: 0, k: 1 });
@@ -62,14 +72,15 @@ export function TraceStep() {
     const r = wrapRef.current!.getBoundingClientRect();
     return { x: (e.clientX - r.left - view.x) / view.k, y: (e.clientY - r.top - view.y) / view.k };
   };
-  const ftToPx = (p: Pt): Pt => ({ x: p.x * (scale ?? 1), y: p.y * (scale ?? 1) });
-  const pxToFt = (p: Pt): Pt => ({ x: p.x / (scale ?? 1), y: p.y / (scale ?? 1) });
+  // Rooms are stored in building feet; this floor's image sits at `off` in that space.
+  const ftToPx = (p: Pt): Pt => ({ x: (p.x - off.x) * (scale ?? 1), y: (p.y - off.y) * (scale ?? 1) });
+  const pxToFt = (p: Pt): Pt => ({ x: p.x / (scale ?? 1) + off.x, y: p.y / (scale ?? 1) + off.y });
 
   /** Snaps a point (image px): to existing corners, to right angles from `prev`, and to the grid when there's no image. */
   const snap = (raw: Pt, prev: Pt | null, exclude?: { roomId: string; index: number }): Pt => {
     const tol = SNAP_PX / view.k;
     const corners: Pt[] = [];
-    for (const r of project.rooms) r.polygon.forEach((p, i) => (exclude?.roomId === r.id && exclude.index === i ? null : corners.push(ftToPx(p))));
+    for (const r of [...rooms, ...belowRooms]) r.polygon.forEach((p, i) => (exclude?.roomId === r.id && exclude.index === i ? null : corners.push(ftToPx(p))));
     corners.push(...draft);
     let best: Pt | null = null;
     for (const c of corners) if (dist(c, raw) < tol && (!best || dist(c, raw) < dist(best, raw))) best = c;
@@ -90,7 +101,7 @@ export function TraceStep() {
 
   const closeDraft = () => {
     if (draft.length < 3 || !scale) return;
-    const room = newRoom(`Room ${project.rooms.length + 1}`, draft.map(pxToFt));
+    const room = newRoom(`Room ${project.rooms.length + 1}`, draft.map(pxToFt), floor.id);
     if (polygonArea(room.polygon) < 4) return;
     update((d) => void d.rooms.push(room));
     setDraft([]);
@@ -104,13 +115,14 @@ export function TraceStep() {
     if (px < 2) return;
     const next = px / ft;
     update((d) => {
-      // Keep already-traced rooms on the same pixels of the image.
-      if (d.scalePxPerFt) {
-        const f = d.scalePxPerFt / next;
-        for (const r of d.rooms) r.polygon = r.polygon.map((p) => ({ x: p.x * f, y: p.y * f }));
+      const fl = floorIn(d);
+      // Keep this floor's traced rooms on the same pixels of the image.
+      if (fl.scalePxPerFt) {
+        const f = fl.scalePxPerFt / next;
+        for (const r of d.rooms) if (r.floorId === floor.id) r.polygon = r.polygon.map((p) => ({ x: (p.x - off.x) * f + off.x, y: (p.y - off.y) * f + off.y }));
       }
-      d.scalePxPerFt = next;
-      d.scaleLine = { a: scaleDraft[0], b: scaleDraft[1], lengthFt: ft };
+      fl.scalePxPerFt = next;
+      fl.scaleLine = { a: scaleDraft[0], b: scaleDraft[1], lengthFt: ft };
     });
     setScaleDraft([]);
     setScaleInput('');
@@ -145,7 +157,7 @@ export function TraceStep() {
       }
       if (e.key === 'Enter') closeDraft();
       if (e.key === 'Backspace' && draft.length) setDraft(draft.slice(0, -1));
-      else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId && project.rooms.some((r) => r.id === selectedId)) {
+      else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId && rooms.some((r) => r.id === selectedId)) {
         update((d) => void (d.rooms = d.rooms.filter((r) => r.id !== selectedId)));
         select(null);
       }
@@ -153,6 +165,7 @@ export function TraceStep() {
         if (e.key === 'v') setTool('select');
         if (e.key === 'd') setTool('draw');
         if (e.key === 's') setTool('scale');
+        if (e.key === 'a' && below) setTool('align');
       }
     };
     const up = (e: KeyboardEvent) => {
@@ -177,7 +190,12 @@ export function TraceStep() {
 
   const onPointerDown = (e: React.PointerEvent) => {
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
-    drag.current = { kind: 'pending', sx: e.clientX, sy: e.clientY, vx: view.x, vy: view.y, panning: e.button === 1 || spaceHeld };
+    const panning = e.button === 1 || spaceHeld;
+    if (effectiveTool === 'align' && !panning) {
+      drag.current = { kind: 'align', start: toImg(e), offset: { ...off }, rooms: new Map(rooms.map((r) => [r.id, r.polygon])), moved: false };
+      return;
+    }
+    drag.current = { kind: 'pending', sx: e.clientX, sy: e.clientY, vx: view.x, vy: view.y, panning };
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
@@ -202,10 +220,22 @@ export function TraceStep() {
     } else if (d.kind === 'room') {
       if (!d.moved) checkpoint();
       d.moved = true;
-      const delta = pxToFt({ x: p.x - d.start.x, y: p.y - d.start.y });
+      const delta = { x: (p.x - d.start.x) / (scale ?? 1), y: (p.y - d.start.y) / (scale ?? 1) };
       update((draft) => {
         const r = draft.rooms.find((x) => x.id === d.roomId)!;
         r.polygon = d.orig.map((q) => ({ x: q.x + delta.x, y: q.y + delta.y }));
+      }, { history: false });
+    } else if (d.kind === 'align') {
+      // Slide the floor below's outline over this plan. This floor's rooms stay on their pixels.
+      if (!d.moved) checkpoint();
+      d.moved = true;
+      const delta = { x: -(p.x - d.start.x) / (scale ?? 1), y: -(p.y - d.start.y) / (scale ?? 1) };
+      update((draft) => {
+        floorIn(draft).offsetFt = { x: d.offset.x + delta.x, y: d.offset.y + delta.y };
+        for (const r of draft.rooms) {
+          const orig = d.rooms.get(r.id);
+          if (orig) r.polygon = orig.map((q) => ({ x: q.x + delta.x, y: q.y + delta.y }));
+        }
       }, { history: false });
     }
   };
@@ -219,10 +249,12 @@ export function TraceStep() {
   const k = view.k;
   const stroke = 1.5 / k;
   const scalePreview = scaleDraft.length === 1 && cursor ? [scaleDraft[0], cursor] : scaleDraft.length === 2 ? scaleDraft : null;
-  const cursorStyle = spaceHeld ? 'grab' : effectiveTool === 'select' ? 'default' : 'crosshair';
+  const cursorStyle = spaceHeld ? 'grab' : effectiveTool === 'select' ? 'default' : effectiveTool === 'align' ? 'move' : 'crosshair';
 
   return (
-    <div className="flex h-full min-h-0 flex-col lg:flex-row">
+    <div className="flex h-full min-h-0 flex-col">
+    <FloorTabs note={below ? `${below.name} shows as an orange dashed outline.` : undefined} />
+    <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
       <div className="relative min-h-[65vh] min-w-0 flex-1 border-r border-gray-200 bg-gray-100">
         <div ref={wrapRef} className="absolute inset-0 overflow-hidden" style={{ cursor: cursorStyle, touchAction: 'none' }} onWheel={onWheel}>
           <svg className="h-full w-full select-none" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerLeave={() => setCursor(null)} onDoubleClick={closeDraft}>
@@ -242,7 +274,13 @@ export function TraceStep() {
               )}
 
               {scale &&
-                project.rooms.map((room) => {
+                belowRooms.map((room) => (
+                  <g key={`below-${room.id}`} style={{ pointerEvents: 'none' }}>
+                    <polygon points={room.polygon.map(ftToPx).map((p) => `${p.x},${p.y}`).join(' ')} fill={effectiveTool === 'align' ? 'rgb(245 158 11 / 0.10)' : 'none'} stroke="#f59e0b" strokeWidth={1.5 / k} strokeDasharray={`${6 / k} ${4 / k}`} />
+                  </g>
+                ))}
+              {scale &&
+                rooms.map((room) => {
                   const pts = room.polygon.map(ftToPx);
                   const sel = room.id === selectedId;
                   const c = ftToPx(centroid(room.polygon));
@@ -291,11 +329,11 @@ export function TraceStep() {
                   );
                 })}
 
-              {project.scaleLine && !scaleDraft.length && (
+              {floor.scaleLine && !scaleDraft.length && (
                 <g style={{ pointerEvents: 'none' }}>
-                  <line x1={project.scaleLine.a.x} y1={project.scaleLine.a.y} x2={project.scaleLine.b.x} y2={project.scaleLine.b.y} stroke="#f59e0b" strokeWidth={2 / k} strokeDasharray={`${6 / k} ${4 / k}`} />
-                  <text x={(project.scaleLine.a.x + project.scaleLine.b.x) / 2} y={(project.scaleLine.a.y + project.scaleLine.b.y) / 2 - 6 / k} textAnchor="middle" fontSize={11 / k} fill="#b45309">
-                    {project.scaleLine.lengthFt.toFixed(2)} ft
+                  <line x1={floor.scaleLine.a.x} y1={floor.scaleLine.a.y} x2={floor.scaleLine.b.x} y2={floor.scaleLine.b.y} stroke="#f59e0b" strokeWidth={2 / k} strokeDasharray={`${6 / k} ${4 / k}`} />
+                  <text x={(floor.scaleLine.a.x + floor.scaleLine.b.x) / 2} y={(floor.scaleLine.a.y + floor.scaleLine.b.y) / 2 - 6 / k} textAnchor="middle" fontSize={11 / k} fill="#b45309">
+                    {floor.scaleLine.lengthFt.toFixed(2)} ft
                   </text>
                 </g>
               )}
@@ -333,11 +371,12 @@ export function TraceStep() {
               ['select', 'Select', 'V'],
               ['scale', 'Set scale', 'S'],
               ['draw', 'Draw room', 'D'],
+              ...(below ? ([['align', `Align to ${below.name}`, 'A']] as const) : []),
             ] as const
           ).map(([id, label, key]) => (
             <button
               key={id}
-              disabled={id === 'draw' && !scale}
+              disabled={(id === 'draw' || id === 'align') && !scale}
               title={id === 'draw' && !scale ? 'Set the scale first' : `${label} (${key})`}
               onClick={() => setTool(id)}
               className={`rounded-md px-3 py-1 text-sm disabled:opacity-40 ${effectiveTool === id ? 'bg-accent text-white' : 'text-gray-700 hover:bg-gray-100'}`}
@@ -381,14 +420,14 @@ export function TraceStep() {
             <span className="font-semibold">Scale</span>
             {scale ? <span className="text-xs text-gray-600">{scale.toFixed(2)} px / ft</span> : <span className="text-xs font-medium text-amber-700">Not set</span>}
           </div>
-          <TraceHelp tool={effectiveTool} hasScale={!!scale} drafting={draft.length > 0} />
+          <TraceHelp tool={effectiveTool} hasScale={!!scale} drafting={draft.length > 0} belowName={below?.name} />
         </div>
         <div className="flex items-center justify-between px-4 pb-1 pt-3">
-          <span className="text-sm font-semibold">Rooms ({project.rooms.length})</span>
-          <span className="text-xs text-gray-500">{fmtSqFt(project.rooms.reduce((s, r) => s + polygonArea(r.polygon), 0))}</span>
+          <span className="text-sm font-semibold">Rooms ({rooms.length})</span>
+          <span className="text-xs text-gray-500">{fmtSqFt(rooms.reduce((s, r) => s + polygonArea(r.polygon), 0))}</span>
         </div>
         <ul className="min-h-0 flex-1 overflow-y-auto px-2">
-          {project.rooms.map((room) => (
+          {rooms.map((room) => (
             <li key={room.id} className={`group mb-1 flex items-center gap-2 rounded-md px-2 py-1.5 ${room.id === selectedId ? 'bg-accent-soft' : 'hover:bg-gray-50'}`} onClick={() => select(room.id)}>
               <input
                 className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 text-sm hover:border-gray-200 focus:border-accent focus:bg-white focus:outline-none"
@@ -410,7 +449,7 @@ export function TraceStep() {
               </button>
             </li>
           ))}
-          {project.rooms.length === 0 && <li className="px-2 py-4 text-xs text-gray-500">No rooms yet. Use “Draw room” to click around each room’s corners.</li>}
+          {rooms.length === 0 && <li className="px-2 py-4 text-xs text-gray-500">No rooms yet. Use “Draw room” to click around each room’s corners.</li>}
         </ul>
         <div className="border-t border-gray-100 p-4">
           <Button variant="primary" className="w-full" disabled={!project.rooms.length} onClick={() => setStep(3)}>
@@ -419,12 +458,15 @@ export function TraceStep() {
         </div>
       </aside>
     </div>
+    </div>
   );
 }
 
-function TraceHelp({ tool, hasScale, drafting }: { tool: TraceTool; hasScale: boolean; drafting: boolean }) {
+function TraceHelp({ tool, hasScale, drafting, belowName }: { tool: TraceTool; hasScale: boolean; drafting: boolean; belowName?: string }) {
   const lines: React.ReactNode[] =
-    tool === 'scale'
+    tool === 'align'
+      ? [`Drag to slide ${belowName}'s outline (orange, dashed) until it lines up with this plan's outside walls or stairs.`, 'Rooms on this floor stay where they are on the image.']
+      : tool === 'scale'
       ? ['Click both ends of a wall or dimension whose length you know, then type its length.', hasScale ? 'Re-setting the scale keeps traced rooms on the image.' : 'You need a scale before drawing rooms.']
       : tool === 'draw'
         ? [

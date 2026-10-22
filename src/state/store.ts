@@ -1,11 +1,12 @@
 import { produce } from 'immer';
 import { create } from 'zustand';
-import type { BuildingType, Project, SystemType } from '../types';
+import { defaultFloorId, migrateProject, newFloor } from '../engine';
+import type { BuildingType, Floor, Project, SystemType } from '../types';
 import { newId } from '../lib/ids';
 
 export const STEPS = ['Start', 'Upload', 'Trace & scale', 'Room details', 'Layout & inspect', 'Export'] as const;
 export type StepIndex = 0 | 1 | 2 | 3 | 4 | 5;
-export type TraceTool = 'select' | 'scale' | 'draw';
+export type TraceTool = 'select' | 'scale' | 'draw' | 'align';
 
 const HISTORY_LIMIT = 200;
 const COALESCE_MS = 1200;
@@ -14,17 +15,15 @@ const AUTOSAVE_KEY = 'hvac-layout-tool:autosave';
 export function emptyProject(): Project {
   const now = new Date().toISOString();
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: newId('p'),
     name: 'Untitled project',
     zipCode: '',
     buildingType: 'single-story-residential' satisfies BuildingType,
     systemType: 'forced-air-ducted' satisfies SystemType,
-    scalePxPerFt: null,
-    scaleLine: null,
-    background: null,
+    floors: [newFloor('f1', 0)],
     rooms: [],
-    layout: null,
+    layouts: {},
     createdAt: now,
     updatedAt: now,
   };
@@ -45,6 +44,8 @@ interface Store {
   step: StepIndex;
   selectedId: string | null;
   traceTool: TraceTool;
+  /** Floor being viewed and edited. */
+  floorId: string;
 
   update(recipe: (draft: Project) => void, opts?: UpdateOptions): void;
   /** Records the current state as an undo step, before a multi-event edit such as a drag. */
@@ -55,12 +56,13 @@ interface Store {
   setStep(step: StepIndex): void;
   select(id: string | null): void;
   setTraceTool(tool: TraceTool): void;
+  setFloor(floorId: string): void;
 }
 
 function loadAutosave(): Project | null {
   try {
     const raw = localStorage.getItem(AUTOSAVE_KEY);
-    return raw ? (JSON.parse(raw) as Project) : null;
+    return raw ? migrateProject(JSON.parse(raw)) : null;
   } catch {
     return null;
   }
@@ -74,6 +76,7 @@ export const useStore = create<Store>((set, get) => ({
   step: 0,
   selectedId: null,
   traceTool: 'draw',
+  floorId: 'f1',
 
   update(recipe, opts = {}) {
     const { project, past, lastEdit } = get();
@@ -98,7 +101,7 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   replaceProject(project, step = 0) {
-    set({ project, past: [], future: [], lastEdit: null, step, selectedId: null });
+    set({ project, past: [], future: [], lastEdit: null, step, selectedId: null, floorId: defaultFloorId(project) });
   },
 
   undo() {
@@ -116,11 +119,19 @@ export const useStore = create<Store>((set, get) => ({
   setStep: (step) => set({ step, selectedId: null }),
   select: (selectedId) => set({ selectedId }),
   setTraceTool: (traceTool) => set({ traceTool }),
+  setFloor: (floorId) => set({ floorId, selectedId: null }),
 }));
+
+/** The floor being viewed (falls back to the ground floor if the current one was deleted or undone). */
+export function currentFloor(s: Pick<Store, 'project' | 'floorId'> = useStore.getState()): Floor {
+  return s.project.floors.find((f) => f.id === s.floorId) ?? s.project.floors.find((f) => f.id === defaultFloorId(s.project))!;
+}
+
+export const useCurrentFloor = () => useStore((s) => currentFloor(s));
 
 export function restoreAutosave(): boolean {
   const saved = loadAutosave();
-  if (!saved || saved.schemaVersion !== 1) return false;
+  if (!saved) return false;
   useStore.getState().replaceProject(saved, 0);
   return true;
 }

@@ -1,9 +1,12 @@
 import { deriveWalls } from '../engine/walls';
 import type { BackgroundImage } from '../types';
-import { SAMPLE_MARGIN_FT, SAMPLE_PX_PER_FT, buildSampleProject, sampleExtent, sampleLabeledArea, type SamplePlan } from './plans';
+import { SAMPLE_MARGIN_FT, SAMPLE_PX_PER_FT, buildSampleProject, sampleExtent, sampleLabeledArea, sampleLevels, type SamplePlan } from './plans';
 
-/** Draws a sample plan as a simple architectural floor-plan picture, so the upload/trace flow can be tried. */
-export function renderSamplePlanImage(plan: SamplePlan): BackgroundImage {
+/**
+ * Draws one floor of a sample plan as a simple architectural floor-plan picture, so the
+ * upload/trace flow can be tried. Every floor uses the same canvas size, so floors line up.
+ */
+export function renderSamplePlanImage(plan: SamplePlan, level = 0): BackgroundImage {
   const s = SAMPLE_PX_PER_FT;
   const m = SAMPLE_MARGIN_FT;
   const { width, height } = sampleExtent(plan);
@@ -14,6 +17,8 @@ export function renderSamplePlanImage(plan: SamplePlan): BackgroundImage {
   ctx.fillStyle = '#fff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   const project = buildSampleProject(plan);
+  const floorId = `f${level + 1}`;
+  project.rooms = project.rooms.filter((r) => r.floorId === floorId);
   const walls = deriveWalls(project.rooms);
   const px = (v: number) => v * s;
 
@@ -59,7 +64,7 @@ export function renderSamplePlanImage(plan: SamplePlan): BackgroundImage {
   }
   ctx.fillStyle = '#111827';
   ctx.textAlign = 'center';
-  plan.rooms.forEach((r) => {
+  plan.rooms.filter((r) => (r.level ?? 0) === level).forEach((r) => {
     const cx = px((r.rect[0] + r.rect[2]) / 2 + m);
     const cy = px((r.rect[1] + r.rect[3]) / 2 + m);
     const w = r.rect[2] - r.rect[0];
@@ -90,6 +95,7 @@ export function renderSamplePlanImage(plan: SamplePlan): BackgroundImage {
   ctx.fillText(`${width}'-0"`, px(m + width / 2), y + 5);
   ctx.textAlign = 'left';
   ctx.font = '11px sans-serif';
-  ctx.fillText(`${plan.name.toUpperCase()}  ·  SAMPLE FLOOR PLAN  ·  N ↑`, px(m), canvas.height - px(m) / 2);
-  return { dataUrl: canvas.toDataURL('image/png'), width: canvas.width, height: canvas.height, fileName: `${plan.id}-sample-plan.png` };
+  const floorName = sampleLevels(plan).length > 1 ? `  ·  FLOOR ${level + 1}` : '';
+  ctx.fillText(`${plan.name.toUpperCase()}${floorName}  ·  SAMPLE FLOOR PLAN  ·  N ↑`, px(m), canvas.height - px(m) / 2);
+  return { dataUrl: canvas.toDataURL('image/png'), width: canvas.width, height: canvas.height, fileName: `${plan.id}-floor-${level + 1}-sample-plan.png` };
 }

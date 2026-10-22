@@ -1,17 +1,21 @@
-import { equipmentForTons, generateProjectLayout, rebalanceAirflow, snapToBay, splitRegister as splitRegisterLayout, type DesignKey } from '../engine';
-import type { Framing, Pt } from '../types';
+import { equipmentForTons, generateProjectLayout, newFloor, rebalanceAirflow, resolveFraming, snapToBay, sortedFloors, splitRegister as splitRegisterLayout, type DesignKey } from '../engine';
+import { newId } from '../lib/ids';
+import type { Floor, Framing, Layout, Pt } from '../types';
 import { engineResult } from './engine';
-import { useStore } from './store';
+import { currentFloor, useStore } from './store';
 
 const snapFt = (v: number) => Math.round(v * 4) / 4;
+
+/** Every layout action works on the floor being viewed. */
+const floorId = () => currentFloor().id;
+const currentLayout = (): Layout | undefined => useStore.getState().project.layouts[floorId()];
 
 /** Kinds of layout component a user can drag. */
 export function draggableKind(id: string | null): 'ahu' | 'trunk' | 'register' | null {
   if (!id) return null;
   if (id === 'ahu') return 'ahu';
   if (id === 'trunk' || id.startsWith('trunk-')) return 'trunk';
-  const layout = useStore.getState().project.layout;
-  return layout?.registers.some((r) => r.id === id) ? 'register' : null;
+  return currentLayout()?.registers.some((r) => r.id === id) ? 'register' : null;
 }
 
 /** Moves a layout component during a drag (call `checkpoint()` once when the drag starts). */
@@ -22,9 +26,11 @@ export function moveComponent(id: string, p: Pt) {
   // In joist bays a register boot has to sit between joists.
   const grid = kind === 'register' ? engineResult(useStore.getState().project).grid : null;
   if (grid) q = snapToBay(q, grid);
+  const f = floorId();
   useStore.getState().update(
     (d) => {
-      const L = d.layout!;
+      const L = d.layouts[f];
+      if (!L) return;
       if (kind === 'ahu') {
         // The trunk runs through the air handler, so it follows it.
         const old = L.airHandler.position;
@@ -40,39 +46,60 @@ export function moveComponent(id: string, p: Pt) {
   );
 }
 
-export function regenerateLayout(keepAirHandler: boolean) {
-  const { project, update } = useStore.getState();
-  const layout = generateProjectLayout(project, {
-    airHandlerPosition: keepAirHandler ? project.layout?.airHandler.position : undefined,
-    tons: keepAirHandler ? project.layout?.airHandler.tons : undefined,
+/** Sets (or clears, with null) one floor's layout. */
+function setLayout(f: string, layout: Layout | null) {
+  useStore.getState().update((d) => {
+    const next = { ...d.layouts };
+    if (layout) next[f] = layout;
+    else delete next[f];
+    d.layouts = next;
   });
-  update((d) => void (d.layout = layout));
+}
+
+export function regenerateLayout(keepAirHandler: boolean, f = floorId()) {
+  const { project } = useStore.getState();
+  const current = project.layouts[f];
+  const layout = generateProjectLayout(project, {
+    floorId: f,
+    airHandlerPosition: keepAirHandler ? current?.airHandler.position : undefined,
+    tons: keepAirHandler ? current?.airHandler.tons : undefined,
+  });
+  setLayout(f, layout);
+}
+
+/** Generates layouts for every floor that has rooms but no layout yet (one undo step). */
+export function generateMissingLayouts() {
+  const { project, update } = useStore.getState();
+  const missing = project.floors.filter((fl) => !project.layouts[fl.id] && project.rooms.some((r) => r.floorId === fl.id));
+  if (!missing.length) return;
+  const made = Object.fromEntries(missing.map((fl) => [fl.id, generateProjectLayout(project, { floorId: fl.id })]).filter(([, l]) => l));
+  update((d) => void (d.layouts = { ...d.layouts, ...made }));
 }
 
 export function setAirHandlerTons(tons: number) {
+  const f = floorId();
   useStore.getState().update((d) => {
-    if (d.layout) Object.assign(d.layout.airHandler, equipmentForTons(tons));
+    if (d.layouts[f]) Object.assign(d.layouts[f].airHandler, equipmentForTons(tons));
   });
 }
 
 export function rebalance() {
-  const { project, update } = useStore.getState();
-  const layout = rebalanceAirflow(project);
-  update((d) => void (d.layout = layout));
+  const f = floorId();
+  setLayout(f, rebalanceAirflow(useStore.getState().project, { floorId: f }));
 }
 
 /** Splits a register or grille into several in neighbouring bays, sharing its airflow. */
 export function splitRegister(id: string, parts: number) {
-  const { project, update, select } = useStore.getState();
-  const layout = splitRegisterLayout(project, id, parts);
-  update((d) => void (d.layout = layout));
-  select(null);
+  const f = floorId();
+  setLayout(f, splitRegisterLayout(useStore.getState().project, id, parts, { floorId: f }));
+  useStore.getState().select(null);
 }
 
 export function setRegisterCfm(id: string, cfm: number) {
+  const f = floorId();
   useStore.getState().update(
     (d) => {
-      const r = d.layout?.registers.find((x) => x.id === id);
+      const r = d.layouts[f]?.registers.find((x) => x.id === id);
       if (r) r.targetCfm = cfm;
     },
     { coalesce: `cfm-${id}` },
@@ -80,22 +107,32 @@ export function setRegisterCfm(id: string, cfm: number) {
 }
 
 export function deleteRegister(id: string) {
+  const f = floorId();
   useStore.getState().update((d) => {
-    if (d.layout) d.layout.registers = d.layout.registers.filter((r) => r.id !== id);
+    if (d.layouts[f]) d.layouts[f].registers = d.layouts[f].registers.filter((r) => r.id !== id);
   });
   useStore.getState().select(null);
 }
 
 export function addRegister(roomId: string, kind: 'supply' | 'return', position: Pt) {
+  const f = floorId();
   const id = `${kind === 'supply' ? 's' : 'r'}-${roomId}-${Math.random().toString(36).slice(2, 6)}`;
-  useStore.getState().update((d) => void d.layout?.registers.push({ id, roomId, kind, position, targetCfm: kind === 'supply' ? 75 : 100 }));
+  useStore.getState().update((d) => void d.layouts[f]?.registers.push({ id, roomId, kind, position, targetCfm: kind === 'supply' ? 75 : 100 }));
   useStore.getState().select(id);
 }
 
+/** Joist sizes are shared by the building; where ducts run is set per floor. */
 export function setFraming(patch: Partial<Framing>) {
+  const { ductSpace, ...shared } = patch;
+  const f = floorId();
   useStore.getState().update(
     (d) => {
-      d.framing = { ...engineResult(useStore.getState().project).framing, ...patch };
+      if (Object.keys(shared).length) d.framing = { ...resolveFraming(d.framing), ...shared };
+      if (ductSpace) {
+        const floor = d.floors.find((x) => x.id === f)!;
+        if (d.floors.length > 1) floor.ductSpace = ductSpace;
+        else d.framing = { ...resolveFraming(d.framing), ductSpace };
+      }
     },
     { coalesce: `framing-${Object.keys(patch).join()}` },
   );
@@ -112,4 +149,45 @@ export function setDesignInput(key: DesignKey, value: number | undefined) {
     },
     { coalesce: `design-${key}` },
   );
+}
+
+/** Adds a floor on top of the building and switches to it. */
+export function addFloor() {
+  const { project, update, setFloor } = useStore.getState();
+  const top = sortedFloors(project.floors).at(-1);
+  const level = top ? top.level + 1 : 0;
+  // Start the new floor with the same scale and alignment as the one below, so a plan drawn
+  // at the same scale lines up straight away.
+  const floor: Floor = { ...newFloor(newId('f'), level), scalePxPerFt: top?.scalePxPerFt ?? null, offsetFt: top ? { ...top.offsetFt } : { x: 0, y: 0 } };
+  update((d) => {
+    d.floors.push(floor);
+    if (d.floors.length > 1) d.buildingType = 'multi-story-residential';
+  });
+  setFloor(floor.id);
+}
+
+export function updateFloor(id: string, patch: Partial<Pick<Floor, 'name' | 'heightFt'>>) {
+  useStore.getState().update(
+    (d) => {
+      const f = d.floors.find((x) => x.id === id);
+      if (f) Object.assign(f, patch);
+    },
+    { coalesce: `floor-${id}-${Object.keys(patch).join()}` },
+  );
+}
+
+/** Removes a floor with its rooms and layout; floors above move down a level. */
+export function deleteFloor(id: string) {
+  const { project, update, setFloor } = useStore.getState();
+  if (project.floors.length <= 1) return;
+  const gone = project.floors.find((f) => f.id === id);
+  if (!gone) return;
+  update((d) => {
+    d.floors = d.floors.filter((f) => f.id !== id).map((f) => (f.level > gone.level ? { ...f, level: f.level - 1 } : f));
+    d.rooms = d.rooms.filter((r) => r.floorId !== id);
+    const next = { ...d.layouts };
+    delete next[id];
+    d.layouts = next;
+  });
+  setFloor(sortedFloors(useStore.getState().project.floors)[0].id);
 }

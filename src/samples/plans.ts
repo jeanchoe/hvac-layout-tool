@@ -1,11 +1,14 @@
 import { deriveWalls } from '../engine/walls';
 import { applyRoomDefaults } from '../lib/roomDefaults';
-import type { Project, Room } from '../types';
+import { newFloor } from '../engine/floors';
+import type { Floor, Project, Room } from '../types';
 
 export interface SampleRoom {
   name: string;
   /** Rectangle in feet: [x0, y0, x1, y1], x east, y south. */
   rect: [number, number, number, number];
+  /** Storey, 0 = ground floor (default). */
+  level?: number;
 }
 
 export interface SamplePlan {
@@ -75,7 +78,32 @@ export const SAMPLE_PLANS: SamplePlan[] = [
       { name: 'Primary Bath', rect: [32, 40, 44, 50] },
     ],
   },
+  {
+    id: 'two-story',
+    name: 'Two-story — 4 bed',
+    description: '40 × 28 ft on two floors + family room wing, 2,528 sq ft',
+    zipCode: '20001',
+    rooms: [
+      { name: 'Living Room', rect: [0, 0, 16, 14] },
+      { name: 'Dining', rect: [0, 14, 16, 28] },
+      { name: 'Hall', rect: [16, 0, 24, 28] },
+      { name: 'Kitchen', rect: [24, 0, 40, 16] },
+      { name: 'Powder Bath', rect: [24, 16, 30, 22] },
+      { name: 'Laundry', rect: [30, 16, 40, 22] },
+      { name: 'Office', rect: [24, 22, 40, 28] },
+      { name: 'Family Room', rect: [40, 6, 58, 22] },
+      { name: 'Primary Bedroom', rect: [0, 0, 16, 16], level: 1 },
+      { name: 'Primary Bath', rect: [0, 16, 10, 28], level: 1 },
+      { name: 'Bedroom 2', rect: [10, 16, 24, 28], level: 1 },
+      { name: 'Upstairs Hall', rect: [16, 0, 24, 16], level: 1 },
+      { name: 'Bedroom 3', rect: [24, 0, 40, 14], level: 1 },
+      { name: 'Bedroom 4', rect: [24, 14, 34, 28], level: 1 },
+      { name: 'Bath 2', rect: [34, 14, 40, 28], level: 1 },
+    ],
+  },
 ];
+
+export const sampleLevels = (plan: SamplePlan) => [...new Set(plan.rooms.map((r) => r.level ?? 0))].sort((a, b) => a - b);
 
 /** Image layout used when rendering a sample as a floor-plan picture. */
 export const SAMPLE_PX_PER_FT = 20;
@@ -92,8 +120,17 @@ export const sampleLabeledArea = (r: SampleRoom) => (r.rect[2] - r.rect[0]) * (r
 /** A ready-traced project for a sample plan (rooms offset by the image margin so they line up with its picture). */
 export function buildSampleProject(plan: SamplePlan): Project {
   const m = SAMPLE_MARGIN_FT;
+  const { width } = sampleExtent(plan);
+  const s = SAMPLE_PX_PER_FT;
+  // Every floor's picture uses the same margin and scale, so the floors line up with no offset.
+  const floors: Floor[] = sampleLevels(plan).map((level) => ({
+    ...newFloor(`f${level + 1}`, level),
+    scalePxPerFt: s,
+    scaleLine: { a: { x: m * s, y: (m - 2.5) * s }, b: { x: (m + width) * s, y: (m - 2.5) * s }, lengthFt: width },
+  }));
   let rooms: Room[] = plan.rooms.map((r, i) => ({
     id: `${plan.id}-r${i + 1}`,
+    floorId: `f${(r.level ?? 0) + 1}`,
     name: r.name,
     polygon: [
       { x: r.rect[0] + m, y: r.rect[1] + m },
@@ -111,21 +148,17 @@ export function buildSampleProject(plan: SamplePlan): Project {
   const walls = deriveWalls(rooms);
   let n = 0;
   rooms = rooms.map((r) => applyRoomDefaults(r, walls, () => `${r.id}-w${n++}`));
-  const { width } = sampleExtent(plan);
-  const s = SAMPLE_PX_PER_FT;
   const now = new Date(0).toISOString();
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: `sample-${plan.id}`,
     name: plan.name,
     zipCode: plan.zipCode,
-    buildingType: 'single-story-residential',
+    buildingType: floors.length > 1 ? 'multi-story-residential' : 'single-story-residential',
     systemType: 'forced-air-ducted',
-    scalePxPerFt: s,
-    scaleLine: { a: { x: m * s, y: (m - 2.5) * s }, b: { x: (m + width) * s, y: (m - 2.5) * s }, lengthFt: width },
-    background: null,
+    floors,
     rooms,
-    layout: null,
+    layouts: {},
     createdAt: now,
     updatedAt: now,
   };

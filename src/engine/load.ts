@@ -1,4 +1,5 @@
 import type { Room, Wall } from '../types';
+import type { Exposure } from './floors';
 import { defaultConfig, type ClimateInfo, type EngineConfig, type ResolvedDesign } from './config';
 import { polygonArea } from './geometry';
 
@@ -31,6 +32,8 @@ export interface LoadInput {
   climate: ClimateInfo;
   design: ResolvedDesign;
   config: EngineConfig;
+  /** Which parts of each room's ceiling and floor face unconditioned space; default: all of it, ground floor. */
+  exposure?: Map<string, Exposure>;
 }
 
 /**
@@ -65,7 +68,7 @@ const sum = (lines: LoadLine[]) => lines.reduce((s, l) => s + l.btuh, 0);
 
 export const simplifiedLoadModel: LoadModel = {
   name: 'Simplified heat-transfer estimate (U×A×ΔT, solar, infiltration, internal gains). Not Manual J.',
-  estimate({ rooms, walls, design, config }) {
+  estimate({ rooms, walls, design, config, exposure }) {
     const L = config.loads;
     const v = (k: keyof ResolvedDesign) => design[k].value;
     const dtCool = v('outdoorCoolingF') - v('indoorCoolingF');
@@ -93,15 +96,20 @@ export const simplifiedLoadModel: LoadModel = {
       const infCfm = (v('ach') * area * h) / 60;
       const occ = people.get(room.id) ?? 0;
       const appliances = room.applianceBtuh ?? (KITCHEN.test(room.name) ? L.kitchenApplianceBtuh : 0);
-      const floorFactor = L.floorTempDifferenceFactor[room.floorType] ?? 0;
+      const exp = exposure?.get(room.id) ?? { level: 0, ceiling: 1, floor: 1 };
+      const ceilingArea = area * exp.ceiling;
+      const ground = exp.level === 0;
+      // Upper floors only lose through the part of the floor with no room below (over a garage or outdoors).
+      const floorFactor = ground ? (L.floorTempDifferenceFactor[room.floorType] ?? 0) : L.floorTempDifferenceFactor['over-garage'];
+      const floorArea = area * exp.floor;
       const ductF = v('ductLoadFactor');
 
       const coolingEnvelope = [
         line('walls', 'Walls', netWall * v('wallU') * (dtCool + L.wallSolarTempAdderF)),
         line('windowConduction', 'Windows (conduction)', windowArea * v('windowU') * dtCool),
         line('windowSolar', 'Windows (sun)', solar),
-        line('ceiling', 'Ceiling to attic', area * v('ceilingU') * (dtCool + L.atticTempAdderF)),
-        line('floor', 'Floor', area * v('floorU') * dtCool * floorFactor),
+        line('ceiling', 'Ceiling to attic', ceilingArea * v('ceilingU') * (dtCool + L.atticTempAdderF)),
+        line('floor', 'Floor', floorArea * v('floorU') * dtCool * floorFactor),
         line('infiltration', 'Air leakage', L.sensibleAirFactor * infCfm * dtCool),
         line('people', `People (${occ.toFixed(1)})`, occ * L.personSensibleBtuh),
         line('appliances', 'Appliances', appliances),
@@ -109,12 +117,13 @@ export const simplifiedLoadModel: LoadModel = {
       const cooling = [...coolingEnvelope, line('ducts', 'Ducts', sum(coolingEnvelope) * ductF)];
       const latent = [line('infiltration', 'Air leakage (moisture)', L.latentAirFactor * infCfm * v('grainsDifference')), line('people', 'People (moisture)', occ * L.personLatentBtuh)];
 
-      const floorHeat = room.floorType === 'slab' ? extLength * v('slabF') * dtHeat : area * v('floorU') * dtHeat * floorFactor;
+      const slab = ground && room.floorType === 'slab';
+      const floorHeat = slab ? extLength * v('slabF') * dtHeat : floorArea * v('floorU') * dtHeat * floorFactor;
       const heatingEnvelope = [
         line('walls', 'Walls', netWall * v('wallU') * dtHeat),
         line('windowConduction', 'Windows', windowArea * v('windowU') * dtHeat),
-        line('ceiling', 'Ceiling to attic', area * v('ceilingU') * dtHeat),
-        line('floor', room.floorType === 'slab' ? 'Slab edge' : 'Floor', floorHeat),
+        line('ceiling', 'Ceiling to attic', ceilingArea * v('ceilingU') * dtHeat),
+        line('floor', slab ? 'Slab edge' : 'Floor', floorHeat),
         line('infiltration', 'Air leakage', L.sensibleAirFactor * infCfm * dtHeat),
       ];
       const heating = [...heatingEnvelope, line('ducts', 'Ducts', sum(heatingEnvelope) * ductF)];

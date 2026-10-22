@@ -1,5 +1,6 @@
 import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import { migrateProject } from '../engine';
 import type { BackgroundImage, Project } from '../types';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -93,9 +94,8 @@ export async function readProjectFile(file: File): Promise<Project> {
   } catch {
     throw new Error('That file is not valid JSON.');
   }
-  const p = data as Project;
-  if (!p || p.schemaVersion !== 1 || !Array.isArray(p.rooms)) throw new Error('That file is not an HVAC Layout Tool project.');
-  return p;
+  // Older files (single floor) are upgraded on open.
+  return migrateProject(data);
 }
 
 /** Opens the browser file picker and resolves with the chosen file. */

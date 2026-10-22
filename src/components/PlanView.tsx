@@ -24,7 +24,7 @@ interface Props {
 export function PlanView({ project, result, selectedId, onSelect, showLayout, editable, focusRoomId, onWallClick, className = '' }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const drag = useRef<{ id: string; offset: Pt; moved: boolean } | null>(null);
-  const layout = project.layout;
+  const layout = project.layouts[result.floorId];
   const warned = useMemo(() => new Set(result.warnings.flatMap((w) => w.componentIds)), [result.warnings]);
 
   const pts = result.rooms.flatMap((r) => r.polygon);

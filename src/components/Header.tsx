@@ -9,7 +9,7 @@ export async function openProjectFromDisk(): Promise<string | null> {
   if (!file) return null;
   try {
     const project = await readProjectFile(file);
-    useStore.getState().replaceProject(project, project.layout ? 4 : project.rooms.length ? 3 : 0);
+    useStore.getState().replaceProject(project, Object.keys(project.layouts).length ? 4 : project.rooms.length ? 3 : 0);
     return null;
   } catch (e) {
     return (e as Error).message;

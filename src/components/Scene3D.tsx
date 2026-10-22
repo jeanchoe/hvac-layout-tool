@@ -1,13 +1,13 @@
 import { Html, Line, OrbitControls } from '@react-three/drei';
 import { Canvas, useThree, type ThreeEvent } from '@react-three/fiber';
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
-import { joistPositions, type EngineResult, type JoistGrid } from '../engine';
+import { floorElevations, joistPositions, type EngineResult, type JoistGrid } from '../engine';
 import { bbox, centroid, dist } from '../engine/geometry';
 import { draggableKind, moveComponent } from '../state/layoutActions';
 import { useStore } from '../state/store';
-import type { DuctSegment, Project, Pt, Room } from '../types';
+import type { DuctSegment, Layout, Project, Pt, Room } from '../types';
 import { COLORS } from './PlanView';
 
 export type WallMode = 'cutaway' | 'full' | 'hidden';
@@ -18,11 +18,26 @@ export interface ViewRequest {
 
 interface SceneProps {
   project: Project;
-  result: EngineResult;
+  /** Every floor's result; `floorId` picks the one being edited. */
+  results: Record<string, EngineResult>;
+  floorId: string;
+  /** Show just the floor being edited, or the whole building with the other floors faded. */
+  floorView: 'this' | 'all';
   selectedId: string | null;
   wallMode: WallMode;
   showLabels: boolean;
   viewRequest: ViewRequest;
+}
+
+interface FloorProps {
+  project: Project;
+  result: EngineResult;
+  elevation: number;
+  /** Faded, not interactive: another floor shown for context. */
+  ghost: boolean;
+  selectedId: string | null;
+  wallMode: WallMode;
+  showLabels: boolean;
 }
 
 const AHU_SIZE = { w: 2.5, h: 4.5, d: 2.5 };
@@ -52,13 +67,62 @@ export function Scene3D(props: SceneProps) {
   );
 }
 
-function SceneContent({ project, result, selectedId, wallMode, showLabels, viewRequest }: SceneProps) {
-  const layout = project.layout;
+function SceneContent({ project, results, floorId, floorView, selectedId, wallMode, showLabels, viewRequest }: SceneProps) {
+  const elevations = floorElevations(project.floors);
+  const shown = floorView === 'all' ? project.floors.map((f) => f.id) : [floorId];
+  const pts = shown.flatMap((id) => results[id]?.rooms.flatMap((r) => r.polygon) ?? []);
+  const b = pts.length ? bbox(pts) : { minX: 0, minY: 0, maxX: 40, maxY: 30, width: 40, height: 30 };
+  const top = Math.max(...shown.map((id) => elevations.get(id) ?? 0));
+  const center = new THREE.Vector3(b.minX + b.width / 2, floorView === 'all' ? top / 2 : (elevations.get(floorId) ?? 0), b.minY + b.height / 2);
+  return (
+    <>
+      <CameraRig center={center} span={Math.max(b.width, b.height, top)} request={viewRequest} />
+      {/* Ground */}
+      <mesh rotation-x={-Math.PI / 2} position={[center.x, -0.05, center.z]}>
+        <planeGeometry args={[b.width + 60, b.height + 60]} />
+        <meshBasicMaterial color="#f8fafc" />
+      </mesh>
+      {shown.map((id) =>
+        results[id] ? (
+          <FloorContent
+            key={id}
+            project={project}
+            result={results[id]}
+            elevation={elevations.get(id) ?? 0}
+            ghost={id !== floorId}
+            selectedId={selectedId}
+            wallMode={id === floorId ? wallMode : 'cutaway'}
+            showLabels={showLabels && id === floorId}
+          />
+        ) : null,
+      )}
+      <OrbitControls makeDefault enableDamping dampingFactor={0.12} maxPolarAngle={Math.PI / 2.05} />
+    </>
+  );
+}
+
+/** Fades everything inside a group and stops it reacting to the pointer. */
+function Ghost({ children }: { children: React.ReactNode }) {
+  const ref = useRef<THREE.Group>(null);
+  useLayoutEffect(() => {
+    ref.current?.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      mesh.raycast = () => {};
+      const mats = mesh.material ? (Array.isArray(mesh.material) ? mesh.material : [mesh.material]) : [];
+      for (const m of mats) {
+        m.transparent = true;
+        m.opacity = Math.min(m.opacity, 0.22);
+        m.depthWrite = false;
+      }
+    });
+  });
+  return <group ref={ref}>{children}</group>;
+}
+
+function FloorContent({ project, result, elevation, ghost, selectedId, wallMode, showLabels }: FloorProps) {
+  const layout = project.layouts[result.floorId];
   const select = useStore((s) => s.select);
   const warned = useMemo(() => new Set(result.warnings.flatMap((w) => w.componentIds)), [result.warnings]);
-  const pts = result.rooms.flatMap((r) => r.polygon);
-  const b = pts.length ? bbox(pts) : { minX: 0, minY: 0, maxX: 40, maxY: 30, width: 40, height: 30 };
-  const center = new THREE.Vector3(b.minX + b.width / 2, 0, b.minY + b.height / 2);
   const maxCeiling = Math.max(8, ...result.rooms.map((r) => r.ceilingHeight));
   const roomById = new Map(result.rooms.map((r) => [r.id, r]));
   const grid = result.grid;
@@ -75,15 +139,8 @@ function SceneContent({ project, result, selectedId, wallMode, showLabels, viewR
   const isSel = (id: string) => id === selectedId || (id.startsWith('trunk') && !!selectedId?.startsWith('trunk'));
   const colorFor = (id: string, base: string) => (isSel(id) ? COLORS.select : warned.has(id) ? COLORS.danger : base);
 
-  return (
-    <>
-      <CameraRig center={center} span={Math.max(b.width, b.height)} request={viewRequest} />
-
-      {/* Ground */}
-      <mesh rotation-x={-Math.PI / 2} position={[center.x, -0.05, center.z]}>
-        <planeGeometry args={[b.width + 60, b.height + 60]} />
-        <meshBasicMaterial color="#f8fafc" />
-      </mesh>
+  const body = (
+    <group position-y={elevation}>
 
       {result.rooms.map((room) => (
         <RoomFloor key={room.id} id={room.id} polygon={room.polygon} selected={room.id === selectedId} warned={warned.has(room.id)} onSelect={() => select(room.id)} />
@@ -123,9 +180,9 @@ function SceneContent({ project, result, selectedId, wallMode, showLabels, viewR
             const y = ductHeight(d);
             const id = isTrunk ? 'trunk' : d.id;
             return (
-              <Draggable key={d.id} id={id} height={y} project={project}>
+              <MaybeDrag ghost={ghost} layout={layout} elevation={elevation} key={d.id} id={id} height={y}>
                 <Duct duct={d} y={y} color={colorFor(isTrunk ? 'trunk' : d.id, d.side === 'supply' ? COLORS.accent : COLORS.return)} highlight={warned.has(d.id)} />
-              </Draggable>
+              </MaybeDrag>
             );
           })}
 
@@ -136,7 +193,7 @@ function SceneContent({ project, result, selectedId, wallMode, showLabels, viewR
             const color = colorFor(r.id, r.kind === 'supply' ? COLORS.accent : COLORS.return);
             const size = r.kind === 'supply' ? [1.2, 0.12, 0.8] : [1.8, 0.12, 1.4];
             return (
-              <Draggable key={r.id} id={r.id} height={ceil} project={project}>
+              <MaybeDrag ghost={ghost} layout={layout} elevation={elevation} key={r.id} id={r.id} height={ceil}>
                 <group position={[r.position.x, 0, r.position.y]}>
                   <mesh position={[0, ceil, 0]}>
                     <boxGeometry args={size as [number, number, number]} />
@@ -153,11 +210,11 @@ function SceneContent({ project, result, selectedId, wallMode, showLabels, viewR
                     <meshBasicMaterial color={color} transparent opacity={0.45} />
                   </mesh>
                 </group>
-              </Draggable>
+              </MaybeDrag>
             );
           })}
 
-          <Draggable id="ahu" height={AHU_SIZE.h} project={project}>
+          <MaybeDrag ghost={ghost} layout={layout} elevation={elevation} id="ahu" height={AHU_SIZE.h}>
             <group position={[layout.airHandler.position.x, 0, layout.airHandler.position.y]}>
               <mesh position={[0, AHU_SIZE.h / 2, 0]}>
                 <boxGeometry args={[AHU_SIZE.w, AHU_SIZE.h, AHU_SIZE.d]} />
@@ -174,13 +231,13 @@ function SceneContent({ project, result, selectedId, wallMode, showLabels, viewR
                 </Html>
               )}
             </group>
-          </Draggable>
+          </MaybeDrag>
         </>
       )}
 
-      <OrbitControls makeDefault enableDamping dampingFactor={0.12} maxPolarAngle={Math.PI / 2.05} />
-    </>
+    </group>
   );
+  return ghost ? <Ghost>{body}</Ghost> : body;
 }
 
 function CameraRig({ center, span, request }: { center: THREE.Vector3; span: number; request: ViewRequest }) {
@@ -301,8 +358,18 @@ function Joists({ rooms, grid, ceiling }: { rooms: Room[]; grid: JoistGrid; ceil
   );
 }
 
+/** Draggable on the floor being edited; plain on ghost floors. Drag heights are in world space. */
+function MaybeDrag({ ghost, layout, elevation, id, height, children }: { ghost: boolean; layout: Layout | undefined; elevation: number; id: string; height: number; children: React.ReactNode }) {
+  if (ghost || !layout) return <>{children}</>;
+  return (
+    <Draggable id={id} height={height + elevation} layout={layout}>
+      {children}
+    </Draggable>
+  );
+}
+
 /** Click to inspect; drag (for movable components) along a horizontal plane at `height`. */
-function Draggable({ id, height, project, children }: { id: string; height: number; project: Project; children: React.ReactNode }) {
+function Draggable({ id, height, layout, children }: { id: string; height: number; layout: Layout; children: React.ReactNode }) {
   const select = useStore((s) => s.select);
   const controls = useThree((s) => s.controls) as OrbitControlsImpl | null;
   const drag = useRef<{ plane: THREE.Plane; offset: Pt; moved: boolean } | null>(null);
@@ -311,7 +378,7 @@ function Draggable({ id, height, project, children }: { id: string; height: numb
     return e.ray.intersectPlane(plane, v) ? { x: v.x, y: v.z } : null;
   };
   const position = (): Pt => {
-    const L = project.layout!;
+    const L = layout;
     if (id === 'ahu') return L.airHandler.position;
     if (id === 'trunk') return L.trunk.axis === 'x' ? { x: 0, y: L.trunk.offset } : { x: L.trunk.offset, y: 0 };
     return L.registers.find((r) => r.id === id)?.position ?? { x: 0, y: 0 };
