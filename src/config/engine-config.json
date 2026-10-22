@@ -1,58 +1,137 @@
 {
-  "_note": "Simplified rule-of-thumb estimates for the v1 prototype. NOT ACCA Manual J/S/D. Edit freely.",
+  "_note": "Load inputs for the v1 heat-transfer estimate. Still NOT an ACCA Manual J calculation. Every value is editable here and most can be overridden per project. Values were entered from published references and must be checked against the cited source before relying on them.",
   "climateZones": {
     "1": {
       "label": "Very hot-humid",
-      "coolingBtuhPerSqFt": 22,
-      "heatingBtuhPerSqFt": 10
+      "representativeCity": "Miami, FL",
+      "outdoorCoolingF": 91,
+      "outdoorHeatingF": 47,
+      "grainsDifference": 55,
+      "wallU": 0.084,
+      "windowU": 0.5,
+      "windowShgc": 0.25,
+      "ceilingU": 0.035,
+      "floorU": 0.064,
+      "slabF": 0.73
     },
     "2": {
       "label": "Hot",
-      "coolingBtuhPerSqFt": 20,
-      "heatingBtuhPerSqFt": 15
+      "representativeCity": "Houston, TX",
+      "outdoorCoolingF": 96,
+      "outdoorHeatingF": 33,
+      "grainsDifference": 45,
+      "wallU": 0.084,
+      "windowU": 0.4,
+      "windowShgc": 0.25,
+      "ceilingU": 0.026,
+      "floorU": 0.064,
+      "slabF": 0.73
     },
     "3": {
       "label": "Warm",
-      "coolingBtuhPerSqFt": 18,
-      "heatingBtuhPerSqFt": 20
+      "representativeCity": "Atlanta, GA",
+      "outdoorCoolingF": 93,
+      "outdoorHeatingF": 24,
+      "grainsDifference": 40,
+      "wallU": 0.06,
+      "windowU": 0.3,
+      "windowShgc": 0.25,
+      "ceilingU": 0.026,
+      "floorU": 0.047,
+      "slabF": 0.73
     },
     "4": {
       "label": "Mixed",
-      "coolingBtuhPerSqFt": 16,
-      "heatingBtuhPerSqFt": 25
+      "representativeCity": "Raleigh, NC",
+      "outdoorCoolingF": 93,
+      "outdoorHeatingF": 20,
+      "grainsDifference": 30,
+      "wallU": 0.045,
+      "windowU": 0.3,
+      "windowShgc": 0.4,
+      "ceilingU": 0.024,
+      "floorU": 0.047,
+      "slabF": 0.54
     },
     "5": {
       "label": "Cool",
-      "coolingBtuhPerSqFt": 14,
-      "heatingBtuhPerSqFt": 30
+      "representativeCity": "Chicago, IL",
+      "outdoorCoolingF": 90,
+      "outdoorHeatingF": -1,
+      "grainsDifference": 25,
+      "wallU": 0.045,
+      "windowU": 0.3,
+      "windowShgc": 0.4,
+      "ceilingU": 0.024,
+      "floorU": 0.033,
+      "slabF": 0.54
     },
     "6": {
       "label": "Cold",
-      "coolingBtuhPerSqFt": 13,
-      "heatingBtuhPerSqFt": 35
+      "representativeCity": "Minneapolis, MN",
+      "outdoorCoolingF": 89,
+      "outdoorHeatingF": -11,
+      "grainsDifference": 20,
+      "wallU": 0.045,
+      "windowU": 0.3,
+      "windowShgc": 0.4,
+      "ceilingU": 0.024,
+      "floorU": 0.033,
+      "slabF": 0.54
     },
     "7": {
       "label": "Very cold",
-      "coolingBtuhPerSqFt": 12,
-      "heatingBtuhPerSqFt": 40
+      "representativeCity": "Duluth, MN",
+      "outdoorCoolingF": 84,
+      "outdoorHeatingF": -17,
+      "grainsDifference": 10,
+      "wallU": 0.045,
+      "windowU": 0.3,
+      "windowShgc": 0.4,
+      "ceilingU": 0.024,
+      "floorU": 0.028,
+      "slabF": 0.54
     }
   },
   "defaultClimateZone": 4,
-  "windowCoolingBtuhPerSqFt": {
-    "N": 10,
-    "E": 25,
-    "S": 30,
-    "W": 40
+  "loads": {
+    "indoorCoolingF": 75,
+    "indoorHeatingF": 70,
+    "wallSolarTempAdderF": 10,
+    "atticTempAdderF": 25,
+    "solarGainFactor": {
+      "N": 40,
+      "E": 160,
+      "S": 110,
+      "W": 180
+    },
+    "ach": 0.3,
+    "ductLoadFactor": 0.1,
+    "sensibleAirFactor": 1.08,
+    "latentAirFactor": 0.68,
+    "personSensibleBtuh": 230,
+    "personLatentBtuh": 200,
+    "kitchenApplianceBtuh": 1200,
+    "floorTempDifferenceFactor": {
+      "slab": 0,
+      "crawlspace": 0.5,
+      "basement": 0.3,
+      "over-garage": 0.6
+    }
   },
-  "windowHeatingBtuhPerSqFtPerZone": 6,
-  "exteriorWallCoolingBtuhPerSqFt": 1.2,
-  "exteriorWallHeatingBtuhPerSqFtPerZone": 0.45,
-  "ceilingHeightFactorPerFtAbove8": 0.08,
-  "floorTypeHeatingMultiplier": {
-    "slab": 1.0,
-    "crawlspace": 1.05,
-    "basement": 0.95,
-    "over-garage": 1.12
+  "sources": {
+    "designTemps": "Approximate ASHRAE 1% cooling / 99% heating dry-bulb for a representative city in the climate zone",
+    "indoorTemps": "ACCA Manual J indoor design conditions (75°F cooling, 70°F heating)",
+    "envelopeU": "IECC 2021 Table R402.1.2 prescriptive U-factors (code-minimum construction)",
+    "windowShgc": "IECC 2021 Table R402.1.2 glazed fenestration SHGC (zones 4+ have no requirement; 0.40 assumed)",
+    "slabF": "ASHRAE 90.1 Appendix A slab F-factors (unheated slab: uninsulated 0.73, R-10 edge 0.54)",
+    "solarGain": "Peak solar gain per sq ft of glass at SHGC 1.0, approx. ASHRAE clear-sky values near 40°N, reduced because east and west peaks don't coincide",
+    "atticTemp": "Vented attic assumed 25°F hotter than outdoor design",
+    "infiltration": "0.3 natural air changes per hour, typical of IECC-tested new construction",
+    "people": "ACCA Manual J: 230 BTU/h sensible + 200 latent per person; bedrooms + 1 people",
+    "appliances": "ACCA Manual J kitchen appliance allowance (~1,200 BTU/h)",
+    "ducts": "10% allowance for ducts outside the conditioned space",
+    "airflow": "Blower airflow 400 CFM per nominal ton; each room gets a share proportional to its sensible load"
   },
   "cfmPerTon": 400,
   "btuhPerTon": 12000,
@@ -66,6 +145,7 @@
     5
   ],
   "maxCfmPerSupplyRegister": 150,
+  "minCfmPerSupplyRegister": 25,
   "registerInsetFromWallFt": 1.0,
   "minRegisterSpacingFt": 3.0,
   "frictionRateInWcPer100Ft": 0.08,
@@ -127,6 +207,19 @@
     "lossFreeLengthFt": 20,
     "lossPerFtBeyond": 0.005,
     "minEfficiency": 0.6
+  },
+  "framingDefaults": {
+    "ductSpace": "attic",
+    "joistDirection": "y",
+    "spacingIn": 24,
+    "depthIn": 9.25,
+    "soffitDepthIn": 14
+  },
+  "framing": {
+    "joistThicknessIn": 1.5,
+    "ductClearanceIn": 0.5,
+    "bootWidthIn": 10,
+    "maxAspectRatio": 4
   },
   "validation": {
     "lowAirflowTolerance": 0.1,

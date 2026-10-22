@@ -1,5 +1,7 @@
 import type { Layout, Room, Warning, Wall } from '../types';
 import { defaultConfig, type EngineConfig } from './config';
+import { maxCfmForSpace } from './ductSizing';
+import { acrossJoists, bootHitsJoist } from './framing';
 import { dist, distToSegment, pointInPolygon } from './geometry';
 import type { RoomLoad } from './load';
 import type { RouteResult } from './route';
@@ -96,11 +98,44 @@ export function validate({ rooms, walls, loads, layout, route, config = defaultC
       warnings.push({ id: `overlap-${regs[i].id}-ahu`, code: 'COMPONENT_OVERLAP', severity: 'warning', message: 'A register overlaps the air handler.', componentIds: [regs[i].id, ahu.id] });
     }
   }
+  // 4. Framing: every duct must fit the space it runs in, and boots must land between joists.
+  // A branch that is too big can be split into several grilles in neighbouring bays.
+  const fixBySplitting = (d: (typeof route.ducts)[0]): Pick<Warning, 'fix'> => {
+    if (d.type !== 'branch' || !d.registerId || !route.grid) return {};
+    const cap = maxCfmForSpace(d.maxHeightIn, route.grid.clearWidthIn, config);
+    return cap > 0 ? { fix: { kind: 'split-register', registerId: d.registerId, parts: Math.ceil(d.cfm / cap) } } : {};
+  };
+  for (const d of route.ducts) {
+    if (d.fits) continue;
+    const inches = (v = 0) => `${Math.round(v * 10) / 10}"`;
+    const where = d.type === 'branch' ? `${inches(route.grid?.clearWidthIn)} wide × ${inches(d.maxHeightIn)} deep joist bay` : `${inches(d.maxHeightIn)} soffit`;
+    warnings.push({
+      id: `no-fit-${d.id}`,
+      code: 'DUCT_DOES_NOT_FIT',
+      severity: 'error',
+      message: `A ${fmt(d.cfm)} CFM ${d.side} ${d.type} (${d.diameter}" round equivalent) doesn't fit the ${where}.`,
+      componentIds: [d.id, ...(d.registerId ? [d.registerId] : [])],
+      ...fixBySplitting(d),
+    });
+  }
+  if (route.grid) {
+    for (const reg of regs) {
+      if (!bootHitsJoist(acrossJoists(reg.position, route.grid.framing), route.grid, config)) continue;
+      warnings.push({
+        id: `on-joist-${reg.id}`,
+        code: 'REGISTER_ON_JOIST',
+        severity: 'warning',
+        message: `${reg.kind === 'supply' ? 'Supply register' : 'Return grille'} in ${roomById.get(reg.roomId)?.name ?? 'unknown room'} lands on a joist. Move it into a bay.`,
+        componentIds: [reg.id],
+      });
+    }
+  }
+
   if (!rooms.some((r) => pointInPolygon(ahu.position, r.polygon))) {
     warnings.push({ id: 'ahu-outside', code: 'AHU_OUTSIDE_BUILDING', severity: 'warning', message: 'The air handler is outside the traced rooms.', componentIds: [ahu.id] });
   }
 
-  // 4. Total airflow must match the air handler.
+  // 5. Total airflow must match the air handler.
   for (const kind of ['supply', 'return'] as const) {
     const total = regs.filter((r) => r.kind === kind).reduce((s, r) => s + r.targetCfm, 0);
     if (Math.abs(total - ahu.airflowCfm) > ahu.airflowCfm * v.airflowMatchTolerance) {

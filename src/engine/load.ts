@@ -1,26 +1,40 @@
 import type { Room, Wall } from '../types';
-import { defaultConfig, type ClimateInfo, type EngineConfig } from './config';
+import { defaultConfig, type ClimateInfo, type EngineConfig, type ResolvedDesign } from './config';
 import { polygonArea } from './geometry';
+
+/** One line of a room's load, e.g. "Windows (sun)". */
+export interface LoadLine {
+  key: 'walls' | 'windowConduction' | 'windowSolar' | 'ceiling' | 'floor' | 'infiltration' | 'people' | 'appliances' | 'ducts';
+  label: string;
+  btuh: number;
+}
 
 export interface RoomLoad {
   roomId: string;
   areaSqFt: number;
+  sensibleCoolingBtuh: number;
+  latentCoolingBtuh: number;
+  /** Sensible + latent. */
   coolingBtuh: number;
   heatingBtuh: number;
-  /** Airflow the room needs for its cooling load (CFM). */
+  /** Design airflow: the room's share of the blower airflow, by sensible load. */
   requiredCfm: number;
-  breakdown: { base: number; windows: number; walls: number; ceiling: number };
+  occupants: number;
+  cooling: LoadLine[];
+  latent: LoadLine[];
+  heating: LoadLine[];
 }
 
 export interface LoadInput {
   rooms: Room[];
   walls: Wall[];
   climate: ClimateInfo;
+  design: ResolvedDesign;
   config: EngineConfig;
 }
 
 /**
- * Anything that turns rooms into per-room loads. v1 ships a simplified rule-of-thumb model;
+ * Anything that turns rooms into per-room loads. v1 ships a simplified heat-transfer method;
  * a real ACCA Manual J implementation can replace it without touching the rest of the engine.
  */
 export interface LoadModel {
@@ -28,53 +42,136 @@ export interface LoadModel {
   estimate(input: LoadInput): RoomLoad[];
 }
 
+const LIVING = /living|family|great|den/i;
+const KITCHEN = /kitchen/i;
+
+/** People at the cooling peak: bedrooms + 1, placed in living areas by floor area (Manual J convention). */
+export function assignOccupants(rooms: Room[]): Map<string, number> {
+  const out = new Map<string, number>();
+  const fixed = rooms.filter((r) => r.occupants !== undefined);
+  for (const r of fixed) out.set(r.id, r.occupants!);
+  const total = Math.max(0, rooms.filter((r) => r.isBedroom).length + 1 - fixed.reduce((s, r) => s + r.occupants!, 0));
+  const auto = rooms.filter((r) => r.occupants === undefined);
+  let hosts = auto.filter((r) => LIVING.test(r.name));
+  if (!hosts.length) hosts = auto.filter((r) => /kitchen|dining/i.test(r.name));
+  if (!hosts.length && auto.length) hosts = [auto.reduce((a, b) => (polygonArea(b.polygon) > polygonArea(a.polygon) ? b : a))];
+  const area = hosts.reduce((s, r) => s + polygonArea(r.polygon), 0) || 1;
+  for (const r of auto) out.set(r.id, hosts.includes(r) ? (total * polygonArea(r.polygon)) / area : 0);
+  return out;
+}
+
+const line = (key: LoadLine['key'], label: string, btuh: number): LoadLine => ({ key, label, btuh: Math.max(0, btuh) });
+const sum = (lines: LoadLine[]) => lines.reduce((s, l) => s + l.btuh, 0);
+
 export const simplifiedLoadModel: LoadModel = {
-  name: 'Simplified area-factor estimate (not Manual J)',
-  estimate({ rooms, walls, climate, config }) {
-    const zone = config.climateZones[String(climate.zone)];
+  name: 'Simplified heat-transfer estimate (U×A×ΔT, solar, infiltration, internal gains). Not Manual J.',
+  estimate({ rooms, walls, design, config }) {
+    const L = config.loads;
+    const v = (k: keyof ResolvedDesign) => design[k].value;
+    const dtCool = v('outdoorCoolingF') - v('indoorCoolingF');
+    const dtHeat = v('indoorHeatingF') - v('outdoorHeatingF');
+    const people = assignOccupants(rooms);
+
     return rooms.map((room) => {
       const area = polygonArea(room.polygon);
+      const h = room.ceilingHeight;
       const roomWalls = walls.filter((w) => w.roomId === room.id);
       const wallById = new Map(roomWalls.map((w) => [w.id, w]));
+      const ext = roomWalls.filter((w) => w.exterior);
+      const extLength = ext.reduce((s, w) => s + w.length, 0);
 
-      const baseCool = area * zone.coolingBtuhPerSqFt;
-      const baseHeat = area * zone.heatingBtuhPerSqFt * (config.floorTypeHeatingMultiplier[room.floorType] ?? 1);
-
-      let windowCool = 0;
       let windowArea = 0;
+      let solar = 0;
       for (const win of room.windows) {
         const wall = wallById.get(win.wallId);
         if (!wall) continue;
         const a = win.count * win.width * win.height;
         windowArea += a;
-        windowCool += a * config.windowCoolingBtuhPerSqFt[wall.facing];
+        solar += a * v('windowShgc') * L.solarGainFactor[wall.facing];
       }
-      const windowHeat = windowArea * config.windowHeatingBtuhPerSqFtPerZone * climate.zone;
+      const netWall = Math.max(0, extLength * h - windowArea);
+      const infCfm = (v('ach') * area * h) / 60;
+      const occ = people.get(room.id) ?? 0;
+      const appliances = room.applianceBtuh ?? (KITCHEN.test(room.name) ? L.kitchenApplianceBtuh : 0);
+      const floorFactor = L.floorTempDifferenceFactor[room.floorType] ?? 0;
+      const ductF = v('ductLoadFactor');
 
-      const extWallArea = roomWalls.filter((w) => w.exterior).reduce((s, w) => s + w.length * room.ceilingHeight, 0);
-      const netWallArea = Math.max(0, extWallArea - windowArea);
-      const wallCool = netWallArea * config.exteriorWallCoolingBtuhPerSqFt;
-      const wallHeat = netWallArea * config.exteriorWallHeatingBtuhPerSqFtPerZone * climate.zone;
+      const coolingEnvelope = [
+        line('walls', 'Walls', netWall * v('wallU') * (dtCool + L.wallSolarTempAdderF)),
+        line('windowConduction', 'Windows (conduction)', windowArea * v('windowU') * dtCool),
+        line('windowSolar', 'Windows (sun)', solar),
+        line('ceiling', 'Ceiling to attic', area * v('ceilingU') * (dtCool + L.atticTempAdderF)),
+        line('floor', 'Floor', area * v('floorU') * dtCool * floorFactor),
+        line('infiltration', 'Air leakage', L.sensibleAirFactor * infCfm * dtCool),
+        line('people', `People (${occ.toFixed(1)})`, occ * L.personSensibleBtuh),
+        line('appliances', 'Appliances', appliances),
+      ];
+      const cooling = [...coolingEnvelope, line('ducts', 'Ducts', sum(coolingEnvelope) * ductF)];
+      const latent = [line('infiltration', 'Air leakage (moisture)', L.latentAirFactor * infCfm * v('grainsDifference')), line('people', 'People (moisture)', occ * L.personLatentBtuh)];
 
-      const ceilingFactor = Math.max(0, room.ceilingHeight - 8) * config.ceilingHeightFactorPerFtAbove8;
-      const ceilingCool = baseCool * ceilingFactor;
-      const ceilingHeat = baseHeat * ceilingFactor;
+      const floorHeat = room.floorType === 'slab' ? extLength * v('slabF') * dtHeat : area * v('floorU') * dtHeat * floorFactor;
+      const heatingEnvelope = [
+        line('walls', 'Walls', netWall * v('wallU') * dtHeat),
+        line('windowConduction', 'Windows', windowArea * v('windowU') * dtHeat),
+        line('ceiling', 'Ceiling to attic', area * v('ceilingU') * dtHeat),
+        line('floor', room.floorType === 'slab' ? 'Slab edge' : 'Floor', floorHeat),
+        line('infiltration', 'Air leakage', L.sensibleAirFactor * infCfm * dtHeat),
+      ];
+      const heating = [...heatingEnvelope, line('ducts', 'Ducts', sum(heatingEnvelope) * ductF)];
 
-      const coolingBtuh = baseCool + windowCool + wallCool + ceilingCool;
-      const heatingBtuh = baseHeat + windowHeat + wallHeat + ceilingHeat;
+      const sensible = sum(cooling);
+      const lat = sum(latent);
       return {
         roomId: room.id,
         areaSqFt: area,
-        coolingBtuh,
-        heatingBtuh,
-        requiredCfm: (coolingBtuh / config.btuhPerTon) * config.cfmPerTon,
-        breakdown: { base: baseCool, windows: windowCool, walls: wallCool, ceiling: ceilingCool },
+        sensibleCoolingBtuh: sensible,
+        latentCoolingBtuh: lat,
+        coolingBtuh: sensible + lat,
+        heatingBtuh: sum(heating),
+        requiredCfm: 0,
+        occupants: occ,
+        cooling,
+        latent,
+        heating,
       };
     });
   },
 };
 
-/** Smallest nominal system size that covers the total cooling load. */
+/**
+ * Splits `total` CFM in proportion to `weights`, as whole numbers that sum exactly. Shares below
+ * `min` are raised to it and the rest of the airflow is shared among the others.
+ */
+export function distribute(total: number, weights: number[], min = 0): number[] {
+  const floored = new Set<number>();
+  let shares: number[] = [];
+  for (let pass = 0; pass <= weights.length; pass++) {
+    const free = total - floored.size * min;
+    const sum = weights.reduce((s, w, i) => (floored.has(i) ? s : s + w), 0) || 1;
+    shares = weights.map((w, i) => (floored.has(i) ? min : (free * w) / sum));
+    const low = shares.findIndex((v, i) => !floored.has(i) && v < min);
+    if (low < 0 || floored.size + 1 >= weights.length) break;
+    shares.forEach((v, i) => v < min && floored.add(i));
+  }
+  const vals = shares.map((v) => Math.round(v));
+  const diff = total - vals.reduce((s, v) => s + v, 0);
+  if (vals.length) {
+    const i = vals.indexOf(Math.max(...vals));
+    vals[i] += diff;
+  }
+  return vals;
+}
+
+/**
+ * Gives each room its share of the blower airflow, in proportion to its sensible cooling load,
+ * with at least `minCfm` per room (the same split the registers get).
+ */
+export function assignAirflow(loads: RoomLoad[], blowerCfm: number, minCfm = 0): RoomLoad[] {
+  const cfm = distribute(blowerCfm, loads.map((l) => l.sensibleCoolingBtuh), minCfm);
+  return loads.map((l, i) => ({ ...l, requiredCfm: cfm[i] }));
+}
+
+/** Smallest nominal system size that covers the total (sensible + latent) cooling load. */
 export function sizeEquipment(totalCoolingBtuh: number, config: EngineConfig = defaultConfig) {
   const neededTons = totalCoolingBtuh / config.btuhPerTon;
   const tons = config.nominalTons.find((t) => t >= neededTons) ?? Math.ceil(neededTons * 2) / 2;

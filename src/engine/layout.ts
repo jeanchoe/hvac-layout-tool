@@ -1,7 +1,8 @@
-import type { AirHandler, Layout, Pt, Register, Room, Trunk, Wall, Warning } from '../types';
+import type { AirHandler, Framing, Layout, Pt, Register, Room, Trunk, Wall, Warning } from '../types';
 import type { EngineConfig } from './config';
 import { add, bbox, centroid, closestPointOnSegment, dist, distToPolygonEdge, edges, lerp, outwardNormal, pointInPolygon, scale, sub } from './geometry';
-import { equipmentForTons, type RoomLoad } from './load';
+import { RETURN_TRUNK_GAP_FT, acrossJoists, bayCentre, joistGrid, snapToBay, trunkAxisFor, type JoistGrid } from './framing';
+import { distribute, equipmentForTons, type RoomLoad } from './load';
 import { routeDucts, type RouteResult } from './route';
 import { roomAirflow, validate } from './validate';
 
@@ -65,6 +66,18 @@ function supplyCandidates(room: Room, roomWalls: Wall[], config: EngineConfig): 
   return out;
 }
 
+/** In joist bays, moves a spot to the nearest bay centre that stays well inside the room. */
+function intoBay(p: Pt, room: Room, grid: JoistGrid | null): Pt | null {
+  if (!grid) return p;
+  const c = snapToBay(p, grid);
+  for (const k of [0, -1, 1]) {
+    const shift = k * grid.spacingFt;
+    const q = grid.framing.joistDirection === 'y' ? { x: c.x + shift, y: c.y } : { x: c.x, y: c.y + shift };
+    if (pointInPolygon(q, room.polygon) && distToPolygonEdge(q, room.polygon) >= 0.75) return q;
+  }
+  return null;
+}
+
 function pickSpaced(candidates: Pt[], n: number, spacing: number): Pt[] {
   const chosen: Pt[] = [];
   for (const minGap of [spacing, spacing / 2]) {
@@ -77,27 +90,21 @@ function pickSpaced(candidates: Pt[], n: number, spacing: number): Pt[] {
   return chosen;
 }
 
-/** Splits `total` CFM across registers in proportion to `weights`, as whole numbers that sum exactly. */
-function distribute(total: number, weights: number[]): number[] {
-  const sum = weights.reduce((s, w) => s + w, 0) || 1;
-  const vals = weights.map((w) => Math.round((total * w) / sum));
-  const diff = total - vals.reduce((s, v) => s + v, 0);
-  if (vals.length) {
-    const i = vals.indexOf(Math.max(...vals));
-    vals[i] += diff;
-  }
-  return vals;
-}
-
-export function placeSupplyRegisters(rooms: Room[], walls: Wall[], loads: RoomLoad[], airflowCfm: number, config: EngineConfig): Register[] {
+export function placeSupplyRegisters(rooms: Room[], walls: Wall[], loads: RoomLoad[], airflowCfm: number, config: EngineConfig, grid: JoistGrid | null = null): Register[] {
   const loadById = new Map(loads.map((l) => [l.roomId, l]));
   const valid = rooms.filter((r) => (loadById.get(r.id)?.areaSqFt ?? 0) > 1);
-  const roomCfm = distribute(airflowCfm, valid.map((r) => loadById.get(r.id)!.coolingBtuh));
+  // Room airflow follows sensible load (latent load doesn't change how much air a room needs).
+  const roomCfm = distribute(airflowCfm, valid.map((r) => loadById.get(r.id)!.sensibleCoolingBtuh), config.minCfmPerSupplyRegister);
   const regs: Register[] = [];
   valid.forEach((room, i) => {
-    const n = Math.max(1, Math.ceil(roomCfm[i] / config.maxCfmPerSupplyRegister));
-    const spots = pickSpaced(supplyCandidates(room, walls.filter((w) => w.roomId === room.id), config), n, config.minRegisterSpacingFt);
-    if (spots.length === 0) spots.push(centroid(room.polygon));
+    // Between joists, no register may carry more than one bay's duct can.
+    const perRegister = grid && grid.bayMaxCfm > 0 ? Math.min(config.maxCfmPerSupplyRegister, grid.bayMaxCfm) : config.maxCfmPerSupplyRegister;
+    const n = Math.max(1, Math.ceil(roomCfm[i] / perRegister));
+    const candidates = supplyCandidates(room, walls.filter((w) => w.roomId === room.id), config)
+      .map((p) => intoBay(p, room, grid))
+      .filter((p): p is Pt => p !== null);
+    const spots = pickSpaced(candidates, n, config.minRegisterSpacingFt);
+    if (spots.length === 0) spots.push(intoBay(centroid(room.polygon), room, grid) ?? centroid(room.polygon));
     distribute(roomCfm[i], spots.map(() => 1)).forEach((cfm, k) => {
       regs.push({ id: `s-${room.id}-${k}`, roomId: room.id, position: spots[k], kind: 'supply', targetCfm: cfm });
     });
@@ -109,8 +116,40 @@ function roomAt(p: Pt, rooms: Room[]): Room | undefined {
   return rooms.find((r) => pointInPolygon(p, r.polygon));
 }
 
-export function placeReturns(rooms: Room[], ahu: Pt, supply: Register[], airflowCfm: number): Register[] {
+/** Point on the plan from a position across the trunk axis's perpendicular (`perp`) and along it (`t`). */
+const onTrunkAxes = (axis: Trunk['axis'], perp: number, t: number): Pt => (axis === 'x' ? { x: t, y: perp } : { x: perp, y: t });
+
+/**
+ * `count` grille spots in neighbouring bays, starting at `base` (or just `base` outside joist
+ * bays), kept inside the room and clear of supply registers.
+ */
+function spreadAcrossBays(base: Pt, count: number, room: Room, grid: JoistGrid | null, supply: Register[], gap: number): Pt[] {
+  const out = [base];
+  if (!grid || count <= 1) return out;
+  const c0 = acrossJoists(base, grid.framing);
+  for (let k = 1; out.length < count && k <= 24; k++) {
+    for (const sign of [1, -1]) {
+      if (out.length >= count) break;
+      const c = bayCentre(c0, grid) + sign * k * grid.spacingFt;
+      const p = grid.framing.joistDirection === 'y' ? { x: c, y: base.y } : { x: base.x, y: c };
+      if (!pointInPolygon(p, room.polygon) || distToPolygonEdge(p, room.polygon) < 0.75) continue;
+      if ([...supply.map((r) => r.position), ...out].some((q) => dist(q, p) < gap)) continue;
+      out.push(p);
+    }
+  }
+  return out;
+}
+
+/** Return grilles: one per bedroom plus a central return, split into more grilles when one can't fit. */
+export function placeReturns(rooms: Room[], ahu: Pt, supply: Register[], airflowCfm: number, config: EngineConfig, grid: JoistGrid | null = null, trunk?: Trunk): Register[] {
   const regs: Register[] = [];
+  const push = (prefix: string, room: Room, spots: Pt[], cfm: number) => {
+    distribute(cfm, spots.map(() => 1)).forEach((share, i) => {
+      regs.push({ id: i === 0 ? prefix : `${prefix}-${i + 1}`, roomId: room.id, position: spots[i], kind: 'return', targetCfm: share });
+    });
+  };
+  const gridsNeeded = (cfm: number, cap: number) => (cap > 0 && Number.isFinite(cap) ? Math.max(1, Math.ceil(cfm / cap)) : 1);
+
   let bedroomCfm = 0;
   for (const room of rooms.filter((r) => r.isBedroom)) {
     const cfm = supply.filter((s) => s.roomId === room.id).reduce((s, r) => s + r.targetCfm, 0);
@@ -126,29 +165,52 @@ export function placeReturns(rooms: Room[], ahu: Pt, supply: Register[], airflow
     const len = Math.hypot(toC.x, toC.y) || 1;
     let pos = add(best, scale(toC, 1.5 / len));
     if (!pointInPolygon(pos, room.polygon) || distToPolygonEdge(pos, room.polygon) < 0.8 || supply.some((s) => dist(s.position, pos) < 2)) pos = c;
-    regs.push({ id: `r-${room.id}`, roomId: room.id, position: pos, kind: 'return', targetCfm: cfm });
+    pos = intoBay(pos, room, grid) ?? pos;
+    push(`r-${room.id}`, room, spreadAcrossBays(pos, gridsNeeded(cfm, grid?.bayMaxCfm ?? Infinity), room, grid, supply, config.validation.registerSpacingFt), cfm);
     bedroomCfm += cfm;
   }
+  const centralCfm = Math.max(0, airflowCfm - bedroomCfm);
 
-  // Central return beside the air handler, in a common area if possible.
+  // Between joists: put the central return right beside the trunk soffit so it connects into its
+  // side instead of running up a bay.
+  if (grid && trunk) {
+    const along0 = trunk.axis === 'x' ? ahu.x : ahu.y;
+    const across0 = bayCentre(along0, grid);
+    const rOff = trunk.offset + RETURN_TRUNK_GAP_FT;
+    for (let k = 1; k <= 10; k++) {
+      for (const t of [across0 + k * grid.spacingFt, across0 - k * grid.spacingFt]) {
+        for (const perp of [rOff + 1.25, trunk.offset - 1.25]) {
+          const p = onTrunkAxes(trunk.axis, perp, t);
+          const room = roomAt(p, rooms);
+          if (!room || room.isBedroom || distToPolygonEdge(p, room.polygon) < 0.75 || dist(p, ahu) < 2.5) continue;
+          if (supply.some((s) => dist(s.position, p) < 1.5)) continue;
+          push('r-central', room, spreadAcrossBays(p, gridsNeeded(centralCfm, grid.soffitMaxCfm), room, grid, supply, config.validation.registerSpacingFt), centralCfm);
+          return regs;
+        }
+      }
+    }
+  }
+
+  // Otherwise: beside the air handler, in a common area if possible.
   const b = bbox(rooms.flatMap((r) => r.polygon));
   const center = { x: b.minX + b.width / 2, y: b.minY + b.height / 2 };
   let best: { p: Pt; room: Room; d: number } | null = null;
   for (const radius of [3, 4.5, 6]) {
     for (let k = 0; k < 8; k++) {
       const ang = (k * Math.PI) / 4;
-      const p = { x: ahu.x + Math.cos(ang) * radius, y: ahu.y + Math.sin(ang) * radius };
-      const room = roomAt(p, rooms);
-      if (!room || room.isBedroom || distToPolygonEdge(p, room.polygon) < 1) continue;
+      const raw = { x: ahu.x + Math.cos(ang) * radius, y: ahu.y + Math.sin(ang) * radius };
+      const room = roomAt(raw, rooms);
+      const p = room ? intoBay(raw, room, grid) : null;
+      if (!room || !p || room.isBedroom || distToPolygonEdge(p, room.polygon) < 1 || dist(p, ahu) < 2.5) continue;
       if (supply.some((s) => dist(s.position, p) < 2)) continue;
       const d = dist(p, center);
       if (!best || d < best.d) best = { p, room, d };
     }
     if (best) break;
   }
-  const fallbackRoom = roomAt(ahu, rooms) ?? rooms[0];
+  const room = best?.room ?? roomAt(ahu, rooms) ?? rooms[0];
   const pos = best?.p ?? { x: ahu.x + 3, y: ahu.y };
-  regs.push({ id: 'r-central', roomId: best?.room.id ?? fallbackRoom.id, position: pos, kind: 'return', targetCfm: Math.max(0, airflowCfm - bedroomCfm) });
+  push('r-central', room, spreadAcrossBays(pos, gridsNeeded(centralCfm, grid?.bayMaxCfm ?? Infinity), room, grid, supply, config.validation.registerSpacingFt), centralCfm);
   return regs;
 }
 
@@ -180,28 +242,33 @@ export interface GenerateInput {
   config: EngineConfig;
   /** User-chosen air handler spot; otherwise the engine searches near the plan centre. */
   airHandlerPosition?: Pt;
+  framing: Framing;
   roomsSignature: string;
 }
 
 /** Builds a starting layout: tries nearby variations and keeps the best score. */
 export function generateLayout(input: GenerateInput): { layout: Layout; score: LayoutScore } {
-  const { rooms, walls, loads, tons, config } = input;
+  const { rooms, walls, loads, tons, config, framing } = input;
+  const grid = joistGrid(rooms, framing, config);
   const equipment = equipmentForTons(tons, config);
-  const supply = placeSupplyRegisters(rooms, walls, loads, equipment.airflowCfm, config);
+  const supply = placeSupplyRegisters(rooms, walls, loads, equipment.airflowCfm, config, grid);
   const b = bbox(rooms.flatMap((r) => r.polygon));
   const longAxis: Trunk['axis'] = b.width >= b.height ? 'x' : 'y';
-  const axes: Trunk['axis'][] = Math.max(b.width, b.height) / Math.max(1, Math.min(b.width, b.height)) < 1.3 ? ['x', 'y'] : [longAxis];
+  // In joist bays the trunk has to cross the joists; in an attic it follows the building's long axis.
+  const axes: Trunk['axis'][] = grid ? [trunkAxisFor(framing)] : Math.max(b.width, b.height) / Math.max(1, Math.min(b.width, b.height)) < 1.3 ? ['x', 'y'] : [longAxis];
   const ahuSpots = input.airHandlerPosition ? [input.airHandlerPosition] : airHandlerCandidates(rooms);
 
   let best: { layout: Layout; score: LayoutScore } | null = null;
   for (const pos of ahuSpots) {
-    const returns = placeReturns(rooms, pos, supply, equipment.airflowCfm);
+    const atticReturns = grid ? null : placeReturns(rooms, pos, supply, equipment.airflowCfm, config);
     for (const axis of axes) {
       for (const shift of [0, -3, 3]) {
         const airHandler: AirHandler = { id: 'ahu', position: pos, ...equipment };
         const trunk: Trunk = { axis, offset: (axis === 'x' ? pos.y : pos.x) + shift };
+        // Between joists the central return depends on where the trunk soffit is.
+        const returns = atticReturns ?? placeReturns(rooms, pos, supply, equipment.airflowCfm, config, grid, trunk);
         const layout: Layout = { airHandler, trunk, registers: [...supply, ...returns], roomsSignature: input.roomsSignature };
-        const route = routeDucts(rooms, layout, config);
+        const route = routeDucts(rooms, layout, config, framing);
         const warnings = validate({ rooms, walls, loads, layout, route, config });
         const score = scoreLayout(rooms, loads, layout, route, warnings, config);
         if (!best || score.total < best.score.total) best = { layout, score };

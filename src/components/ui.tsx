@@ -112,3 +112,33 @@ export function Stat({ label, value, sub }: { label: string; value: ReactNode; s
 export function Kbd({ children }: { children: ReactNode }) {
   return <kbd className="rounded border border-gray-300 bg-gray-50 px-1 py-px font-mono text-[10px] text-gray-600">{children}</kbd>;
 }
+
+/**
+ * Number input where empty means "use the default". The default shows as the placeholder,
+ * and clearing the field hands `undefined` back.
+ */
+export function OptionalNumberInput({ value, placeholder, onChange, step = 1, suffix, className = '', id }: { value: number | undefined; placeholder: number; onChange: (v: number | undefined) => void; step?: number; suffix?: string; className?: string; id?: string }) {
+  const [text, setText] = useState(value === undefined ? '' : String(value));
+  useEffect(() => {
+    if ((text === '' ? undefined : Number(text)) !== value) setText(value === undefined ? '' : String(value));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+  return (
+    <div className={`relative ${className}`}>
+      <input
+        id={id}
+        type="number"
+        step={step}
+        className={`${inputClass} ${suffix ? 'pr-12' : ''} placeholder:text-gray-400`}
+        placeholder={String(placeholder)}
+        value={text}
+        onChange={(e) => {
+          setText(e.target.value);
+          if (e.target.value === '') onChange(undefined);
+          else if (Number.isFinite(Number(e.target.value))) onChange(Number(e.target.value));
+        }}
+      />
+      {suffix && <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-gray-400">{suffix}</span>}
+    </div>
+  );
+}

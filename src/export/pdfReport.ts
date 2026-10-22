@@ -1,8 +1,8 @@
 import { jsPDF } from 'jspdf';
-import type { EngineResult } from '../engine';
+import type { DesignKey, EngineResult, LoadLine } from '../engine';
 import { bbox, centroid, lerp } from '../engine/geometry';
 import { BUILDING_TYPES, ESTIMATE_LABEL, SYSTEM_TYPES } from '../lib/catalog';
-import { fmtInt } from '../lib/format';
+import { ductSize, fmtInt } from '../lib/format';
 import type { Project, Pt } from '../types';
 
 type RGB = [number, number, number];
@@ -191,6 +191,8 @@ export function buildReport(project: Project, result: EngineResult): jsPDF {
   kv('Cooling load (est.)', `${fmtInt(result.totals.coolingBtuh)} BTU/h`);
   kv('Heating load (est.)', `${fmtInt(result.totals.heatingBtuh)} BTU/h`);
   kv('Recommended size', `${result.recommended.tons} ton`);
+  const fr = result.framing;
+  kv('Ducts run', fr.ductSpace === 'attic' ? 'In attic' : `Between ${fr.depthIn}" joists, ${fr.spacingIn}" o.c.`);
   if (layout) {
     y += 8;
     sectionTitle('Distribution');
@@ -233,16 +235,17 @@ export function buildReport(project: Project, result: EngineResult): jsPDF {
   doc.addPage();
   header(`Room-by-room estimate  ·  ${date}`);
   const cols = [
-    { h: 'Room', w: 140, a: 'left' as const },
-    { h: 'Area (sq ft)', w: 62 },
-    { h: 'Ceiling (ft)', w: 56 },
-    { h: 'Ext. walls (ft)', w: 66 },
-    { h: 'Windows (sq ft)', w: 72 },
-    { h: 'Cooling (BTU/h)', w: 78 },
-    { h: 'Heating (BTU/h)', w: 78 },
-    { h: 'Needed CFM', w: 60 },
+    { h: 'Room', w: 120, a: 'left' as const },
+    { h: 'Area (sq ft)', w: 52 },
+    { h: 'Ceiling (ft)', w: 48 },
+    { h: 'Ext. walls (ft)', w: 58 },
+    { h: 'Windows (sq ft)', w: 60 },
+    { h: 'Sensible (BTU/h)', w: 70 },
+    { h: 'Latent (BTU/h)', w: 58 },
+    { h: 'Heating (BTU/h)', w: 70 },
+    { h: 'Design CFM', w: 62 },
     { h: 'Delivered CFM', w: 66 },
-    { h: 'Supply / Return', w: 82 },
+    { h: 'Supply / Ret.', w: 56 },
   ];
   y = PAGE.m + 60;
   const drawRow = (cells: string[], opts: { bold?: boolean; head?: boolean; red?: boolean } = {}) => {
@@ -253,7 +256,7 @@ export function buildReport(project: Project, result: EngineResult): jsPDF {
     }
     cells.forEach((cell, i) => {
       const c = cols[i];
-      font(opts.head ? 7.5 : 8, opts.bold || opts.head ? 'bold' : 'normal', opts.head ? C.muted : opts.red && i === 8 ? C.danger : C.ink);
+      font(opts.head ? 7 : 8, opts.bold || opts.head ? 'bold' : 'normal', opts.head ? C.muted : opts.red && i === 9 ? C.danger : C.ink);
       if (c.a === 'left') doc.text(cell, x + 4, y);
       else doc.text(cell, x + c.w - 4, y, { align: 'right' });
       x += c.w;
@@ -285,7 +288,8 @@ export function buildReport(project: Project, result: EngineResult): jsPDF {
         r.ceilingHeight.toFixed(1),
         ext.toFixed(0),
         fmtInt(win),
-        fmtInt(load.coolingBtuh),
+        fmtInt(load.sensibleCoolingBtuh),
+        fmtInt(load.latentCoolingBtuh),
         fmtInt(load.heatingBtuh),
         fmtInt(load.requiredCfm),
         air ? fmtInt(air.delivered) : '—',
@@ -302,9 +306,10 @@ export function buildReport(project: Project, result: EngineResult): jsPDF {
       '',
       '',
       fmtInt(rooms.reduce((s, r) => s + r.windows.reduce((t, w) => t + w.count * w.width * w.height, 0), 0)),
-      fmtInt(result.totals.coolingBtuh),
+      fmtInt(result.totals.sensibleCoolingBtuh),
+      fmtInt(result.totals.latentCoolingBtuh),
       fmtInt(result.totals.heatingBtuh),
-      fmtInt(result.totals.requiredCfm),
+      fmtInt(result.loads.reduce((s, l) => s + l.requiredCfm, 0)),
       layout ? fmtInt(totalDelivered) : '—',
       layout ? `${layout.registers.filter((x) => x.kind === 'supply').length} / ${layout.registers.filter((x) => x.kind === 'return').length}` : '—',
     ],
@@ -323,7 +328,7 @@ export function buildReport(project: Project, result: EngineResult): jsPDF {
   y += 16;
   const sched = new Map<string, { count: number; length: number }>();
   for (const d of result.ducts) {
-    const key = `${d.side === 'supply' ? 'Supply' : 'Return'} ${d.type} · ${d.diameter}" round`;
+    const key = `${d.side === 'supply' ? 'Supply' : 'Return'} ${d.type} · ${ductSize(d)}`;
     const e = sched.get(key) ?? { count: 0, length: 0 };
     e.count += 1;
     e.length += d.length;
@@ -337,7 +342,7 @@ export function buildReport(project: Project, result: EngineResult): jsPDF {
     y += 12;
   }
   font(7, 'normal', C.muted);
-  doc.text('Sized from a round-duct table at 0.08 in. w.c. per 100 ft.', PAGE.m, y + 4);
+  doc.text('Sized from a round-duct table at 0.08 in. w.c. per 100 ft; rectangles use the ASHRAE equivalent diameter.', PAGE.m, y + 4);
 
   let y2 = top;
   const x2 = PAGE.m + 300;
@@ -366,8 +371,8 @@ export function buildReport(project: Project, result: EngineResult): jsPDF {
   y2 += 14;
   font(7.5, 'normal', C.muted);
   const notes = [
-    `Loads: ${result.loadModelName}. Floor area × climate-zone factor, plus window gain by facing, exterior wall area and ceiling height above 8 ft.`,
-    'Airflow: 400 CFM per ton (12,000 BTU/h). Equipment rounded up to the next nominal size; airflow shared across rooms by load.',
+    `Loads: ${result.loadModelName} Inputs and sources are listed on the next page.`,
+    'Airflow: 400 CFM per nominal ton. Equipment is the next nominal size above the total load; each room gets a share of the blower airflow by its sensible load.',
     'Delivered airflow is reduced on branches longer than 20 ft as a rough allowance for static-pressure loss.',
     'This is not an ACCA Manual J, S or D calculation and must not be used for permitting or final equipment selection.',
   ];
@@ -376,6 +381,72 @@ export function buildReport(project: Project, result: EngineResult): jsPDF {
     doc.text(lines, x2, y2);
     y2 += 10 * lines.length + 3;
   }
+
+  // ---------- Load inputs & sources ----------
+  doc.addPage();
+  header(`Load method & inputs  ·  ${date}`);
+  y = PAGE.m + 60;
+  font(10, 'bold');
+  doc.text('Inputs used', PAGE.m, y);
+  y += 16;
+  const inputs: [DesignKey, string, (v: number) => string][] = [
+    ['outdoorCoolingF', 'Outdoor design, summer', (v) => `${v}°F`],
+    ['indoorCoolingF', 'Indoor design, summer', (v) => `${v}°F`],
+    ['outdoorHeatingF', 'Outdoor design, winter', (v) => `${v}°F`],
+    ['indoorHeatingF', 'Indoor design, winter', (v) => `${v}°F`],
+    ['grainsDifference', 'Moisture difference', (v) => `${v} gr/lb`],
+    ['wallU', 'Wall U-factor', (v) => v.toFixed(3)],
+    ['windowU', 'Window U-factor', (v) => v.toFixed(2)],
+    ['windowShgc', 'Window SHGC', (v) => v.toFixed(2)],
+    ['ceilingU', 'Ceiling U-factor', (v) => v.toFixed(3)],
+    ['floorU', 'Floor U-factor', (v) => v.toFixed(3)],
+    ['slabF', 'Slab edge F-factor', (v) => v.toFixed(2)],
+    ['ach', 'Infiltration', (v) => `${v} ACH`],
+    ['ductLoadFactor', 'Duct load allowance', (v) => `${Math.round(v * 100)}%`],
+  ];
+  for (const [key, label, show] of inputs) {
+    const d = result.design[key];
+    font(8, 'normal');
+    doc.text(label, PAGE.m, y);
+    font(8, 'bold', d.overridden ? C.accent : C.ink);
+    doc.text(show(d.value), PAGE.m + 150, y, { align: 'right' });
+    font(7, 'normal', C.muted);
+    const src = doc.splitTextToSize(d.source, 300);
+    doc.text(src[0] + (src.length > 1 ? '…' : ''), PAGE.m + 162, y);
+    y += 13;
+  }
+  font(7, 'normal', C.muted);
+  doc.text('Values in blue were entered for this project; the rest are climate-zone defaults.', PAGE.m, y + 4);
+
+  // Whole-house breakdown by line
+  let yb = PAGE.m + 60;
+  const xb = PAGE.m + 500;
+  font(10, 'bold');
+  doc.text('Whole-house breakdown (BTU/h)', xb, yb);
+  yb += 16;
+  const group = (title: string, pick: (l: (typeof result.loads)[0]) => LoadLine[]) => {
+    const byLabel = new Map<string, number>();
+    for (const l of result.loads) for (const ln of pick(l)) byLabel.set(ln.label.replace(/ \(.*\)$/, ''), (byLabel.get(ln.label.replace(/ \(.*\)$/, '')) ?? 0) + ln.btuh);
+    font(7.5, 'bold', C.muted);
+    doc.text(title.toUpperCase(), xb, yb);
+    yb += 11;
+    let total = 0;
+    for (const [label, v] of byLabel) {
+      if (v < 0.5) continue;
+      total += v;
+      font(8);
+      doc.text(label, xb, yb);
+      doc.text(fmtInt(v), PAGE.w - PAGE.m, yb, { align: 'right' });
+      yb += 11;
+    }
+    font(8, 'bold');
+    doc.text('Total', xb, yb);
+    doc.text(fmtInt(total), PAGE.w - PAGE.m, yb, { align: 'right' });
+    yb += 16;
+  };
+  group('Cooling, sensible', (l) => l.cooling);
+  group('Cooling, latent', (l) => l.latent);
+  group('Heating', (l) => l.heating);
 
   // Footer on every page
   const pages = doc.getNumberOfPages();

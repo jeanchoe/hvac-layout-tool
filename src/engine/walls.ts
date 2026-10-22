@@ -39,20 +39,23 @@ export function deriveWalls(rooms: Room[]): Wall[] {
     poly.forEach((start, i) => {
       const end = poly[(i + 1) % poly.length];
       const length = dist(start, end);
+      // A wall can border several rooms (a hall beside three bedrooms): add up all the overlap.
       let sharedWithRoomId: string | null = null;
       let bestShared = 0;
+      let totalShared = 0;
       for (const other of rooms) {
         if (other.id === room.id || other.polygon.length < 3) continue;
         let shared = 0;
         other.polygon.forEach((c, j) => {
           shared += sharedLength(start, end, c, other.polygon[(j + 1) % other.polygon.length]);
         });
+        totalShared += shared;
         if (shared > bestShared) {
           bestShared = shared;
           sharedWithRoomId = other.id;
         }
       }
-      const autoExterior = bestShared < length * 0.5;
+      const autoExterior = totalShared < length * 0.5;
       const id = wallId(room.id, i);
       const override = room.exteriorOverrides[id];
       walls.push({

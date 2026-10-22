@@ -49,6 +49,48 @@ export interface Room {
   windows: WindowSpec[];
   /** Set once the room-details step has prefilled defaults. */
   defaultsApplied: boolean;
+  /** People counted in this room at the cooling peak. Undefined = automatic. */
+  occupants?: number;
+  /** Sensible appliance gain (BTU/h). Undefined = automatic (kitchens get an allowance). */
+  applianceBtuh?: number;
+}
+
+/**
+ * Per-project overrides of the load-calculation inputs. Anything left undefined uses the
+ * climate-zone default from the engine config.
+ */
+export interface DesignInputs {
+  outdoorCoolingF?: number;
+  outdoorHeatingF?: number;
+  indoorCoolingF?: number;
+  indoorHeatingF?: number;
+  /** Outdoor minus indoor humidity ratio at cooling design (grains of moisture per lb of dry air). */
+  grainsDifference?: number;
+  wallU?: number;
+  windowU?: number;
+  windowShgc?: number;
+  ceilingU?: number;
+  floorU?: number;
+  /** Slab-edge heat loss factor (BTU/h per ft of exposed perimeter per °F). */
+  slabF?: number;
+  /** Natural air changes per hour from infiltration. */
+  ach?: number;
+  /** Extra load from ducts outside the conditioned space, as a fraction (0.1 = 10%). */
+  ductLoadFactor?: number;
+}
+
+/** Where ducts run, and the framing they have to fit around. */
+export interface Framing {
+  /** 'attic': flex duct laid over the ceiling framing. 'joist-bays': ducts run inside the joist spaces. */
+  ductSpace: 'attic' | 'joist-bays';
+  /** Direction the joists run: 'x' = east-west, 'y' = north-south. */
+  joistDirection: 'x' | 'y';
+  /** Joist spacing, on centre (in). */
+  spacingIn: number;
+  /** Joist depth (in). */
+  depthIn: number;
+  /** Deepest dropped soffit allowed for the trunk, which runs across the joists (in). */
+  soffitDepthIn: number;
 }
 
 /** Derived from room polygons; never stored. One per room edge. */
@@ -100,7 +142,17 @@ export interface DuctSegment {
   type: DuctType;
   side: AirSide;
   cfm: number;
+  /** Equivalent round diameter (in), from the friction-rate table. */
   diameter: number;
+  /** Shape actually drawn: round, or rectangular when round won't fit the framing depth. */
+  shape: 'round' | 'rect';
+  /** Rectangular size (in), when shape is 'rect'. */
+  widthIn?: number;
+  heightIn?: number;
+  /** Largest duct height the space allows here (in), or undefined if unconstrained. */
+  maxHeightIn?: number;
+  /** False when no duct shape of this size fits the space it runs through. */
+  fits: boolean;
   length: number;
   registerId?: string;
 }
@@ -109,7 +161,7 @@ export interface Layout {
   airHandler: AirHandler;
   trunk: Trunk;
   registers: Register[];
-  /** Signature of the rooms the layout was generated from, to detect stale layouts. */
+  /** Signature of the rooms and framing the layout was generated from, to detect stale layouts. */
   roomsSignature: string;
 }
 
@@ -125,10 +177,14 @@ export interface Warning {
     | 'REGISTER_OUTSIDE_ROOM'
     | 'COMPONENT_OVERLAP'
     | 'AIRFLOW_MISMATCH'
-    | 'AHU_OUTSIDE_BUILDING';
+    | 'AHU_OUTSIDE_BUILDING'
+    | 'DUCT_DOES_NOT_FIT'
+    | 'REGISTER_ON_JOIST';
   severity: Severity;
   message: string;
   componentIds: string[];
+  /** A one-step fix the UI can offer. */
+  fix?: { kind: 'split-register'; registerId: string; parts: number };
 }
 
 export interface Project {
@@ -143,6 +199,10 @@ export interface Project {
   scaleLine: ScaleLine | null;
   background: BackgroundImage | null;
   rooms: Room[];
+  /** Overrides of the load-calculation inputs (optional; older files have none). */
+  design?: DesignInputs;
+  /** Duct space and framing (optional; defaults to ducts in the attic). */
+  framing?: Framing;
   layout: Layout | null;
   createdAt: string;
   updatedAt: string;
