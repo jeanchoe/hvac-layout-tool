@@ -4,13 +4,23 @@ import { bbox, pointInPolygon, polygonArea } from './geometry';
 
 export const sortedFloors = (floors: Floor[]) => [...floors].sort((a, b) => a.level - b.level);
 
+/** Subfloor, underlayment and ceiling drywall added to the joist depth between floors (ft). */
+export const FLOOR_BUILDUP_FT = 0.25;
+
+/** Floor-to-floor height: as entered, or worked out from the ceilings and the floor framing. */
+export function floorHeight(project: Pick<Project, 'rooms' | 'framing'>, floor: Floor, config: EngineConfig = defaultConfig): number {
+  if (floor.heightFt !== undefined) return floor.heightFt;
+  const ceilings = project.rooms.filter((r) => r.floorId === floor.id).map((r) => r.ceilingHeight);
+  return Math.max(8, ...ceilings) + resolveFraming(project.framing, config).depthIn / 12 + FLOOR_BUILDUP_FT;
+}
+
 /** Height of each floor's finished floor above the ground floor (ft). */
-export function floorElevations(floors: Floor[]): Map<string, number> {
+export function floorElevations(project: Pick<Project, 'floors' | 'rooms' | 'framing'>, config: EngineConfig = defaultConfig): Map<string, number> {
   const out = new Map<string, number>();
   let z = 0;
-  for (const f of sortedFloors(floors)) {
+  for (const f of sortedFloors(project.floors)) {
     out.set(f.id, z);
-    z += f.heightFt;
+    z += floorHeight(project, f, config);
   }
   return out;
 }
@@ -89,7 +99,6 @@ export const newFloor = (id: string, level: number, name = `Floor ${level + 1}`)
   id,
   name,
   level,
-  heightFt: 10,
   background: null,
   scalePxPerFt: null,
   scaleLine: null,

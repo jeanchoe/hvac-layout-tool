@@ -167,10 +167,16 @@ export function addFloor() {
 }
 
 export function updateFloor(id: string, patch: Partial<Pick<Floor, 'name' | 'heightFt'>>) {
+  // An undefined height switches the floor back to the automatic height.
   useStore.getState().update(
     (d) => {
       const f = d.floors.find((x) => x.id === id);
-      if (f) Object.assign(f, patch);
+      if (!f) return;
+      if (patch.name !== undefined) f.name = patch.name;
+      if ('heightFt' in patch) {
+        if (patch.heightFt === undefined) delete f.heightFt;
+        else f.heightFt = patch.heightFt;
+      }
     },
     { coalesce: `floor-${id}-${Object.keys(patch).join()}` },
   );

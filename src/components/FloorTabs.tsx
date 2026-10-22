@@ -1,8 +1,8 @@
 import { useState } from 'react';
-import { sortedFloors } from '../engine';
+import { floorHeight, sortedFloors } from '../engine';
 import { addFloor, deleteFloor, updateFloor } from '../state/layoutActions';
 import { currentFloor, useStore } from '../state/store';
-import { Button, NumberInput } from './ui';
+import { Button, OptionalNumberInput } from './ui';
 
 /** Floor switcher shown on every per-floor step. Hidden for single-storey projects. */
 export function FloorTabs({ note }: { note?: React.ReactNode }) {
@@ -46,7 +46,8 @@ export function FloorTabs({ note }: { note?: React.ReactNode }) {
           </label>
           <label className="text-xs text-gray-600">
             Floor-to-floor height
-            <NumberInput className="mt-1 w-28" value={floor.heightFt} min={7} max={30} step={0.5} suffix="ft" onChange={(v) => updateFloor(floor.id, { heightFt: v })} />
+            <OptionalNumberInput className="mt-1 w-28" value={floor.heightFt} placeholder={Math.round(floorHeight(project, floor) * 100) / 100} step={0.25} suffix="ft" onChange={(v) => updateFloor(floor.id, { heightFt: v })} />
+            <span className="mt-0.5 block text-[11px] text-gray-400">Blank = ceiling + joists + subfloor</span>
           </label>
           <span className="text-xs text-gray-500">Level {floor.level + 1} of {floors.length}</span>
           {floors.length > 1 &&

@@ -41,8 +41,11 @@ export interface Floor {
   name: string;
   /** 0 = ground floor, 1 = the floor above, and so on. */
   level: number;
-  /** Floor-to-floor height (ft): ceiling height plus the floor framing above it. */
-  heightFt: number;
+  /**
+   * Floor-to-floor height (ft). Undefined = automatic: the tallest ceiling on this floor plus
+   * the floor framing above it and allowance for subfloor and drywall.
+   */
+  heightFt?: number;
   background: BackgroundImage | null;
   /** Pixels of this floor's plan image per foot; null until the user sets the scale. */
   scalePxPerFt: number | null;

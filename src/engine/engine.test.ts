@@ -7,7 +7,7 @@ import { acrossJoists, bootHitsJoist, joistGrid } from './framing';
 import { polygonArea } from './geometry';
 import { assignAirflow, equipmentForTons, simplifiedLoadModel, sizeEquipment, type LoadLine } from './load';
 import { deriveWalls } from './walls';
-import { analyzeBuilding, defaultFloorId, floorFraming, newFloor, roomExposure, evaluate, evaluateAll, generateAllLayouts, migrateProject, rebalanceAirflow, roomsOnFloor, splitRegister, usableRooms } from './index';
+import { analyzeBuilding, defaultFloorId, floorElevations, floorFraming, newFloor, roomExposure, evaluate, evaluateAll, generateAllLayouts, migrateProject, rebalanceAirflow, roomsOnFloor, splitRegister, usableRooms } from './index';
 
 const withLayout = (p: Project): Project => ({ ...p, layouts: generateAllLayouts(p) });
 /** The ground floor's layout, for single-floor tests. */
@@ -526,6 +526,16 @@ describe('multiple floors', () => {
     const all = evaluateAll({ ...project, layouts: generateAllLayouts(project) });
     expect(all.f1.grid).not.toBeNull();
     expect(all.f2.grid).toBeNull();
+  });
+
+  it('works out floor-to-floor height from the ceiling and joists unless one is entered', () => {
+    const z = floorElevations(project);
+    expect(z.get('f1')).toBe(0);
+    expect(z.get('f2')).toBeCloseTo(8 + 9.25 / 12 + 0.25); // 8 ft ceiling + 2x10 + subfloor
+    const deeper = { ...project, framing: { ...defaultConfig.framingDefaults, depthIn: 11.875 } };
+    expect(floorElevations(deeper).get('f2')).toBeCloseTo(8 + 11.875 / 12 + 0.25);
+    const entered = { ...project, floors: project.floors.map((f) => (f.id === 'f1' ? { ...f, heightFt: 10 } : f)) };
+    expect(floorElevations(entered).get('f2')).toBe(10);
   });
 
   it('sizes one system per floor', () => {

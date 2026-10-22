@@ -71,7 +71,7 @@ export function Scene3D(props: SceneProps) {
 }
 
 function SceneContent({ project, results, floorId, floorView, selectedId, wallMode, showLabels, showFraming, viewRequest }: SceneProps) {
-  const elevations = floorElevations(project.floors);
+  const elevations = floorElevations(project);
   const shown = floorView === 'all' ? project.floors.map((f) => f.id) : [floorId];
   const pts = shown.flatMap((id) => results[id]?.rooms.flatMap((r) => r.polygon) ?? []);
   const b = pts.length ? bbox(pts) : { minX: 0, minY: 0, maxX: 40, maxY: 30, width: 40, height: 30 };
@@ -94,7 +94,10 @@ function SceneContent({ project, results, floorId, floorView, selectedId, wallMo
             elevation={elevations.get(id) ?? 0}
             ghost={id !== floorId}
             selectedId={selectedId}
-            wallMode={id === floorId ? wallMode : 'cutaway'}
+            wallMode={
+              // With every floor shown, lower floors get full-height walls so the stack reads as one building.
+              floorView === 'all' && (elevations.get(id) ?? 0) < top ? 'full' : id === floorId ? wallMode : 'cutaway'
+            }
             showLabels={showLabels && id === floorId}
             showFraming={showFraming}
           />

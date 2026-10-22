@@ -15,7 +15,7 @@ export { sizeDuct, branchEfficiency, fitDuct, rectEquivalentDiameter } from './d
 export { acrossJoists, joistGrid, joistPositions, snapToBay, type JoistGrid } from './framing';
 export { equipmentForTons, sizeEquipment, simplifiedLoadModel, type LoadLine, type LoadModel, type RoomLoad } from './load';
 export { deriveWalls, wallId } from './walls';
-export { floorElevations, floorFraming, migrateProject, newFloor, roomExposure, roomsOnFloor, sortedFloors, type Exposure } from './floors';
+export { floorElevations, floorFraming, floorHeight, migrateProject, newFloor, roomExposure, roomsOnFloor, sortedFloors, type Exposure } from './floors';
 export type { LayoutScore } from './layout';
 export type { RoomAirflow } from './validate';
 
