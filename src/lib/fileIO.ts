@@ -17,9 +17,21 @@ const imageSize = (src: string) =>
   new Promise<{ width: number; height: number }>((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
-    img.onerror = () => reject(new Error('Could not read that image.'));
+    img.onerror = () => reject(new Error('This browser cannot open that image (HEIC and TIFF are not supported). Export the plan as PDF, PNG or JPG.'));
     img.src = src;
   });
+
+/** What a file really is, from its first bytes (names and types are often missing or wrong). */
+async function sniff(file: Blob): Promise<'pdf' | 'image' | 'unknown'> {
+  const b = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+  const ascii = (from: number, to: number) => String.fromCharCode(...b.slice(from, to));
+  if (ascii(0, 4) === '%PDF') return 'pdf';
+  if (b[0] === 0x89 && ascii(1, 4) === 'PNG') return 'image';
+  if (b[0] === 0xff && b[1] === 0xd8) return 'image'; // JPEG
+  if (ascii(0, 3) === 'GIF' || ascii(0, 2) === 'BM') return 'image';
+  if (ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP') return 'image';
+  return 'unknown';
+}
 
 /** Renders the first page of a PDF to a PNG data URL, about 2000 px on its long side. */
 async function pdfFirstPage(file: File): Promise<{ dataUrl: string; width: number; height: number }> {
@@ -37,18 +49,19 @@ async function pdfFirstPage(file: File): Promise<{ dataUrl: string; width: numbe
   return { dataUrl: canvas.toDataURL('image/png'), width: canvas.width, height: canvas.height };
 }
 
-export const ACCEPTED_PLAN_TYPES = '.png,.jpg,.jpeg,.pdf,image/png,image/jpeg,application/pdf';
+export const ACCEPTED_PLAN_TYPES = '.pdf,.png,.jpg,.jpeg,.webp,.gif,.bmp,application/pdf,image/*';
 
 export async function fileToBackground(file: File): Promise<BackgroundImage> {
-  const name = file.name.toLowerCase();
-  if (file.type === 'application/pdf' || name.endsWith('.pdf')) {
-    return { ...(await pdfFirstPage(file)), fileName: file.name };
+  const kind = await sniff(file);
+  const name = file.name || 'Pasted image';
+  if (kind === 'pdf' || (kind === 'unknown' && /\.pdf$/i.test(name))) {
+    return { ...(await pdfFirstPage(file)), fileName: name };
   }
-  if (!/^image\/(png|jpeg)$/.test(file.type) && !/\.(png|jpe?g)$/.test(name)) {
-    throw new Error('Please upload a PNG, JPG or PDF file.');
+  if (kind === 'unknown' && !file.type.startsWith('image/')) {
+    throw new Error(`"${name}" is not a PDF or image. Upload the plan as PDF, PNG or JPG.`);
   }
   const dataUrl = await readAsDataUrl(file);
-  return { dataUrl, ...(await imageSize(dataUrl)), fileName: file.name };
+  return { dataUrl, ...(await imageSize(dataUrl)), fileName: name };
 }
 
 interface DownloadsApi {

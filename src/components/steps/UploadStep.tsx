@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ACCEPTED_PLAN_TYPES, fileToBackground } from '../../lib/fileIO';
 import { SAMPLE_PLANS, sampleLevels } from '../../samples/plans';
 import { renderSamplePlanImage } from '../../samples/renderPlanImage';
@@ -32,8 +32,11 @@ export function UploadStep() {
     setStep(2);
   };
 
-  const handleFile = async (file: File | undefined) => {
-    if (!file) return;
+  const handleFile = async (file: File | null | undefined) => {
+    if (!file) {
+      setError('No file came through. If you dragged the image from a web page or chat, save it to your computer first, then drop or choose the saved file.');
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -44,6 +47,19 @@ export function UploadStep() {
       setBusy(false);
     }
   };
+
+  // A screenshot on the clipboard can be pasted straight in.
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const file = [...(e.clipboardData?.files ?? [])].find((f) => f.type.startsWith('image/') || f.type === 'application/pdf');
+      if (file) {
+        e.preventDefault();
+        handleFile(file);
+      }
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  });
 
   return (
     <>
@@ -65,10 +81,20 @@ export function UploadStep() {
             dragOver ? 'border-accent bg-accent-soft' : 'border-gray-300 hover:border-gray-400'
           }`}
         >
-          <input type="file" accept={ACCEPTED_PLAN_TYPES} className="hidden" onChange={(e) => handleFile(e.target.files?.[0])} />
+          <input
+            type="file"
+            accept={ACCEPTED_PLAN_TYPES}
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              // Clear it so choosing the same file again still triggers a change.
+              e.target.value = '';
+              if (file) handleFile(file);
+            }}
+          />
           <div className="text-3xl text-gray-300">⬆</div>
           <div className="mt-2 text-sm font-medium">{busy ? 'Reading file…' : 'Drop a floor plan here, or click to browse'}</div>
-          <div className="mt-1 text-xs text-gray-500">PNG, JPG or PDF (first page is used)</div>
+          <div className="mt-1 text-xs text-gray-500">PDF, PNG or JPG (a PDF's first page is used) · or paste a screenshot with Ctrl/⌘+V</div>
           {hasRooms && <div className="mt-2 text-xs text-amber-700">A new plan clears the scale. Traced rooms stay but may need re-aligning.</div>}
         </label>
         {error && <p className="mt-3 text-sm text-danger">{error}</p>}
